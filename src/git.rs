@@ -527,6 +527,8 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
             repo.git(&["config", "user.email", "test@example.com"]);
             repo.git(&["config", "user.name", "Test"]);
             repo.git(&["config", "commit.gpgsign", "false"]);
+            // Keep file contents byte-identical on Windows too.
+            repo.git(&["config", "core.autocrlf", "false"]);
             repo
         }
 
