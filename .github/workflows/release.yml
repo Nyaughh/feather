@@ -46,8 +46,11 @@ jobs:
             asset: feather-linux-x86_64.tar.gz
           - os: macos-latest
             asset: feather-macos-universal.zip
+          # The plain .exe is what installed copies download to update
+          # themselves; the installer is what people download first.
           - os: windows-latest
             asset: feather-windows-x86_64.exe
+            installer: feather-windows-x86_64-setup.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -67,6 +70,11 @@ jobs:
           cargo build --release --locked
           cp target/release/feather.exe "${{ matrix.asset }}"
 
+      - name: Installer (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: tools/build-windows-installer.ps1 $env:VERSION
+
       - name: Build (macOS, universal)
         if: runner.os == 'macOS'
         env:
@@ -80,7 +88,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
-          path: ${{ matrix.asset }}
+          path: |
+            ${{ matrix.asset }}
+            ${{ matrix.installer }}
           if-no-files-found: error
 
   publish:

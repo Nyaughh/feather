@@ -163,7 +163,7 @@ fn bar(
         let mut title = repo.name.clone();
         if let Some((path, dirty)) = detail {
             let name = path.rsplit('/').next().unwrap_or(path);
-            title = format!("{name}{} — {title}", if dirty { " •" } else { "" });
+            title = format!("{name}{} - {title}", if dirty { " •" } else { "" });
         }
         // Centred in the window when there is room, otherwise between the buttons.
         let room = (right - left - 24.0).max(0.0);

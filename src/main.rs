@@ -6,6 +6,7 @@ mod diff;
 mod document;
 mod git;
 mod settings;
+mod svg;
 mod theme;
 mod tree;
 mod ui;

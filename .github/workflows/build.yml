@@ -37,6 +37,18 @@ jobs:
         run: cargo test --locked
       - name: Build
         run: cargo build --release --locked
+      # Building the installer here keeps the release from being the first
+      # place a mistake in it shows up.
+      - name: Installer (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: tools/build-windows-installer.ps1 0.0.0
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: feather-windows-x86_64-setup
+          path: feather-windows-x86_64-setup.exe
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}

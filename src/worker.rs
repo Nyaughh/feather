@@ -2,8 +2,8 @@
 //! directory listing, and nothing that runs `git`, happens on the UI thread.
 //!
 //! Local git commands run one at a time on a dedicated thread (they share the
-//! index lock). That thread also polls for outside changes — a new status, a
-//! different diff, an edited file — and only wakes the UI when something
+//! index lock). That thread also polls for outside changes - a new status, a
+//! different diff, an edited file - and only wakes the UI when something
 //! actually changed, so an idle window does no drawing at all.
 //!
 //! Network commands and file loads get their own short-lived threads so a slow
@@ -304,7 +304,7 @@ impl Worker {
     ///
     /// Normally the text arrives first and syntax colors follow in a second
     /// event, so opening a file is never held up by highlighting. With
-    /// `complete` set, a single event carries both — used when reloading a file
+    /// `complete` set, a single event carries both - used when reloading a file
     /// that is already on screen, so it does not flash uncolored.
     pub fn load_file(&mut self, rel: &str, complete: bool) -> u64 {
         let token = self.token();

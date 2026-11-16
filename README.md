@@ -24,7 +24,8 @@ git work off the UI thread.
 ## Install
 
 Download the build for your computer from the
-[latest release](https://github.com/Nyaughh/feather/releases/latest); the
+[latest release](https://github.com/Nyaughh/feather/releases/latest) (on Windows,
+`feather-windows-x86_64-setup.exe` is the installer); the
 [website](https://feather.lh3k.dev/#install) has the steps for each system.
 Feather needs `git` on your `PATH`.
 

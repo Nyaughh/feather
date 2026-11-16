@@ -226,7 +226,7 @@ pub fn can_highlight(size: u64) -> bool {
 }
 
 /// Highlights `lines`, giving up early (returning `None`) if `generation`
-/// moves on from `token` — i.e. the user has opened something else.
+/// moves on from `token` - i.e. the user has opened something else.
 pub fn highlight(
     lines: &[String],
     rel: &str,
