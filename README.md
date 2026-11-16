@@ -2,6 +2,10 @@
 
 A fast, minimal desktop app for browsing a repository and handling everyday git.
 
+**[feather.lh3k.dev](https://feather.lh3k.dev)** · **[Download](https://github.com/Nyaughh/feather/releases/latest)** for Windows, macOS and Linux
+
+![Feather showing a diff in its Git tab](site/shots/diff.webp)
+
 - **Files** — a lazy file tree with git status markers; syntax-highlighted source,
   rendered Markdown, and image/SVG previews.
 - **Git** — staged and unstaged changes, per-file diffs, stage / unstage / discard,
@@ -13,9 +17,16 @@ Feather is written in Rust with [egui](https://github.com/emilk/egui). It ships 
 single native binary, only repaints when something changes, and does all disk and
 git work off the UI thread.
 
-## Running
+## Install
 
-You need a [Rust toolchain](https://rustup.rs) and `git` on your `PATH`.
+Download the build for your computer from the
+[latest release](https://github.com/Nyaughh/feather/releases/latest); the
+[website](https://feather.lh3k.dev/#install) has the steps for each system.
+Feather needs `git` on your `PATH`.
+
+## Building from source
+
+You need a [Rust toolchain](https://rustup.rs).
 
 ```sh
 cargo run --release            # reopens the last repository
@@ -54,6 +65,16 @@ hooks, signing and credential helpers exactly as they do in a terminal.
 A background thread re-checks git status and the open file or diff every two
 seconds while the window is focused (and immediately when it regains focus). The
 window is only redrawn when one of them actually changed.
+
+## Releasing
+
+1. Set the new version in `Cargo.toml` and add a `## <version>` section to
+   `CHANGELOG.md`; that section becomes the release notes.
+2. Run the **Release** workflow from the Actions tab with that version. It
+   builds the three downloads, then creates the tag and the GitHub release.
+
+The website (`site/`, deployed by Vercel) reads releases from GitHub when it
+loads, so it picks up a new one without a redeploy.
 
 ## Tests
 
