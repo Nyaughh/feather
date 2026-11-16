@@ -11,7 +11,8 @@ A fast, minimal desktop app for browsing a repository and handling everyday git.
 - **Git**: staged and unstaged changes, per-file diffs, stage / unstage / discard,
   commit, and pull / push / fetch.
 - **Branches and worktrees**: side by side at the bottom-left; click either to
-  switch, or type a new name in the branch picker to create one.
+  switch, or type a new name in the branch picker to create one. Branches that
+  only exist on the remote are listed too, and Feather fetches every few minutes.
 - **Settings**: dark, light or system theme, accent colour, font size, line wrap
   and indentation.
 - **Updates**: Feather checks for new releases and can install them itself.

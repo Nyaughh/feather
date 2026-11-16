@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use crate::diff::Diff;
 use crate::document::{self, Body, Highlights, LoadedFile, Preview, Span, TextDoc};
-use crate::git::{self, Change, ChangeKind, Status, Worktree};
+use crate::git::{self, Branch, Change, ChangeKind, Status, Worktree};
 use crate::settings::Settings;
 use crate::tree::Tree;
 use crate::update::{self, Updater};
@@ -239,7 +239,7 @@ pub struct Repo {
     /// False until the first status result arrives.
     pub status_loaded: bool,
     pub decorations: Decorations,
-    pub branches: Vec<String>,
+    pub branches: Vec<Branch>,
     pub worktrees: Vec<Worktree>,
     pub tab: Tab,
     pub view: View,
@@ -676,6 +676,7 @@ impl App {
             while let Some(event) = repo.worker.poll() {
                 repo.handle(event, &mut self.toast, ctx);
             }
+            repo.worker.set_auto_fetch(self.settings.auto_fetch);
             if focused != self.was_focused {
                 // The worker only polls for outside changes while we have focus;
                 // catch up on anything missed as soon as it comes back.

@@ -19,10 +19,14 @@ use std::time::{Duration, Instant};
 
 use crate::diff::{self, Diff};
 use crate::document::{self, Body, FileStamp, Highlights, LoadedFile};
-use crate::git::{self, Change, Status, Worktree};
+use crate::git::{self, Branch, Change, Status, Worktree};
 
 /// How often to look for outside changes while the window has focus.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// Branches and worktrees change less often than files; check every few polls.
+const REFS_EVERY: u32 = 5;
+/// How often to fetch from the remote when that is turned on.
+const FETCH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone, Debug)]
 pub enum Action {
@@ -33,10 +37,14 @@ pub enum Action {
     Discard(Change),
     Commit(String),
     Switch(String),
+    /// Check out a branch that only exists on a remote (`origin/name`).
+    Track(String),
     CreateBranch(String),
     Fetch,
     Pull,
-    Push { has_upstream: bool },
+    Push {
+        has_upstream: bool,
+    },
 }
 
 impl Action {
@@ -51,7 +59,7 @@ impl Action {
             Self::Unstage(_) | Self::UnstageAll => "Unstaging…",
             Self::Discard(_) => "Discarding…",
             Self::Commit(_) => "Committing…",
-            Self::Switch(_) | Self::CreateBranch(_) => "Switching…",
+            Self::Switch(_) | Self::Track(_) | Self::CreateBranch(_) => "Switching…",
             Self::Fetch => "Fetching…",
             Self::Pull => "Pulling…",
             Self::Push { .. } => "Pushing…",
@@ -88,7 +96,7 @@ enum Job {
 pub enum Event {
     Status(Result<Status, String>),
     Refs {
-        branches: Vec<String>,
+        branches: Vec<Branch>,
         worktrees: Vec<Worktree>,
     },
     Diff {
@@ -124,6 +132,11 @@ pub enum Event {
 struct Shared {
     /// Poll only while the window is focused.
     active: AtomicBool,
+    /// Fetch from the remote every so often.
+    auto_fetch: AtomicBool,
+    /// A background fetch is running / has just finished.
+    fetching: AtomicBool,
+    fetched: AtomicBool,
     watch: Mutex<Watch>,
 }
 
@@ -142,11 +155,19 @@ impl Outbox {
     }
 
     fn send_refs(&self, root: &Path) {
+        let (branches, worktrees) = read_refs(root);
         self.send(Event::Refs {
-            branches: git::branches(root).unwrap_or_default(),
-            worktrees: git::worktrees(root).unwrap_or_default(),
+            branches,
+            worktrees,
         });
     }
+}
+
+fn read_refs(root: &Path) -> (Vec<Branch>, Vec<Worktree>) {
+    (
+        git::branches(root).unwrap_or_default(),
+        git::worktrees(root).unwrap_or_default(),
+    )
 }
 
 pub struct Worker {
@@ -179,6 +200,9 @@ impl Worker {
             shared: shared.clone(),
             last_status: None,
             last_diff: None,
+            last_refs: None,
+            polls: 0,
+            last_fetch: None,
         };
         thread::Builder::new()
             .name("feather-git".into())
@@ -208,6 +232,11 @@ impl Worker {
     /// Turns background polling on or off (it is pointless while unfocused).
     pub fn set_active(&self, active: bool) {
         self.shared.active.store(active, Ordering::Relaxed);
+    }
+
+    /// Whether to fetch from the remote every few minutes.
+    pub fn set_auto_fetch(&self, on: bool) {
+        self.shared.auto_fetch.store(on, Ordering::Relaxed);
     }
 
     /// Tells the poller what is on screen.
@@ -319,6 +348,7 @@ fn run_action(root: &Path, action: &Action) -> Result<(), String> {
         Action::Discard(change) => git::discard(root, change),
         Action::Commit(message) => git::commit(root, message),
         Action::Switch(name) => git::switch_branch(root, name),
+        Action::Track(remote_branch) => git::track_branch(root, remote_branch),
         Action::CreateBranch(name) => git::create_branch(root, name),
         Action::Fetch => git::fetch(root),
         Action::Pull => git::pull(root),
@@ -334,6 +364,9 @@ struct GitThread {
     /// What the UI was last told, so polling can stay quiet when nothing moved.
     last_status: Option<Result<Status, String>>,
     last_diff: Option<(u64, Result<Diff, String>)>,
+    last_refs: Option<(Vec<Branch>, Vec<Worktree>)>,
+    polls: u32,
+    last_fetch: Option<Instant>,
 }
 
 impl GitThread {
@@ -341,7 +374,7 @@ impl GitThread {
         // Grammars take a moment to load; do it before anyone is waiting on them.
         thread::spawn(document::warm_up);
         if self.is_git {
-            self.outbox.send_refs(&self.root);
+            self.send_refs(true);
         }
 
         let mut next_poll = Instant::now() + POLL_INTERVAL;
@@ -363,7 +396,10 @@ impl GitThread {
 
     fn handle(&mut self, job: Job) {
         match job {
-            Job::Refresh => self.send_status(true),
+            Job::Refresh => {
+                self.send_status(true);
+                self.send_refs(true);
+            }
             Job::Diff {
                 change,
                 staged,
@@ -373,12 +409,15 @@ impl GitThread {
                 let result = run_action(&self.root, &action);
                 let refs_changed = matches!(
                     action,
-                    Action::Commit(_) | Action::Switch(_) | Action::CreateBranch(_)
+                    Action::Commit(_)
+                        | Action::Switch(_)
+                        | Action::Track(_)
+                        | Action::CreateBranch(_)
                 );
                 self.outbox.send(Event::ActionDone { action, result });
                 self.send_status(true);
                 if refs_changed {
-                    self.outbox.send_refs(&self.root);
+                    self.send_refs(true);
                 }
             }
         }
@@ -386,7 +425,14 @@ impl GitThread {
 
     /// Looks for changes made outside the app and reports only real ones.
     fn poll(&mut self) {
-        self.send_status(false);
+        self.fetch_if_due();
+        // A fetch that just landed may have moved branches and ahead/behind.
+        let fetched = self.shared.fetched.swap(false, Ordering::Relaxed);
+        self.send_status(fetched);
+        self.polls += 1;
+        if fetched || self.polls.is_multiple_of(REFS_EVERY) {
+            self.send_refs(false);
+        }
 
         let watch = match self.shared.watch.lock() {
             Ok(watch) => watch.clone(),
@@ -415,6 +461,43 @@ impl GitThread {
                 staged,
                 token,
             } => self.send_diff(&change, staged, token, false),
+        }
+    }
+
+    /// Starts a quiet fetch when automatic fetching is on and one is due.
+    fn fetch_if_due(&mut self) {
+        let shared = &self.shared;
+        let due = self
+            .last_fetch
+            .is_none_or(|at| at.elapsed() >= FETCH_INTERVAL);
+        if !self.is_git
+            || !due
+            || !shared.auto_fetch.load(Ordering::Relaxed)
+            || shared.fetching.swap(true, Ordering::Relaxed)
+        {
+            return;
+        }
+        self.last_fetch = Some(Instant::now());
+        let (root, shared) = (self.root.clone(), self.shared.clone());
+        thread::spawn(move || {
+            // Failures (offline, no remote, needs a login) are not worth a message.
+            let ok = git::fetch_in_background(&root).is_ok();
+            shared.fetched.store(ok, Ordering::Relaxed);
+            shared.fetching.store(false, Ordering::Relaxed);
+        });
+    }
+
+    fn send_refs(&mut self, force: bool) {
+        if !self.is_git {
+            return;
+        }
+        let refs = read_refs(&self.root);
+        if force || self.last_refs.as_ref() != Some(&refs) {
+            self.last_refs = Some(refs.clone());
+            self.outbox.send(Event::Refs {
+                branches: refs.0,
+                worktrees: refs.1,
+            });
         }
     }
 

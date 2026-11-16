@@ -13,7 +13,7 @@ use super::widgets::{
     paint_row_bg, popup_frame,
 };
 use crate::app::{Cmd, Repo, Tab, View};
-use crate::git::{Change, ChangeKind};
+use crate::git::{Branch, Change, ChangeKind};
 use crate::settings::Settings;
 use crate::theme::{self, ROW_HEIGHT, icon};
 use crate::worker::Action;
@@ -749,6 +749,8 @@ fn worktree_picker(ui: &mut Ui, rect: Rect, repo: &Repo, cmds: &mut Vec<Cmd>) {
     Popup::menu(&response)
         .frame(popup_frame())
         .align(RectAlign::TOP_START)
+        // Stay put above the row even as the list changes size.
+        .align_alternatives(&[RectAlign::TOP_START])
         .gap(4.0)
         .show(|ui| {
             ui.set_width(rect.width().max(260.0));
@@ -786,15 +788,18 @@ fn branch_picker(ui: &mut Ui, rect: Rect, repo: &mut Repo, cmds: &mut Vec<Cmd>) 
     let label = repo.status.branch_label();
     let response = footer_row(ui, rect, "branch", icon::GIT_BRANCH, &label, &detail)
         .on_hover_text("Switch branch");
-    let just_opened = response.clicked();
-    if just_opened {
+    if response.clicked() {
         repo.branch_filter.clear();
+        // Make sure the list is current as it opens.
+        cmds.push(Cmd::Refresh);
     }
     let idle = repo.busy.is_none();
 
     Popup::menu(&response)
         .frame(popup_frame())
         .align(RectAlign::TOP_START)
+        // Stay put above the row even as the list changes size.
+        .align_alternatives(&[RectAlign::TOP_START])
         .gap(4.0)
         .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
@@ -827,13 +832,22 @@ fn branch_picker(ui: &mut Ui, rect: Rect, repo: &mut Repo, cmds: &mut Vec<Cmd>) 
             let filter = repo.branch_filter.trim().to_owned();
             let needle = filter.to_lowercase();
             let current = repo.status.branch.as_deref();
-            let matches: Vec<&String> = repo
+            let matches: Vec<&Branch> = repo
                 .branches
                 .iter()
-                .filter(|b| needle.is_empty() || b.to_lowercase().contains(&needle))
+                .filter(|b| {
+                    needle.is_empty()
+                        || b.name.to_lowercase().contains(&needle)
+                        || b.remote
+                            .as_ref()
+                            .is_some_and(|r| r.to_lowercase().contains(&needle))
+                })
                 .collect();
             let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-            let exact = repo.branches.contains(&filter);
+            let exact = repo
+                .branches
+                .iter()
+                .any(|b| b.name == filter || b.remote.as_deref() == Some(filter.as_str()));
             let mut chosen: Option<Action> = None;
 
             ScrollArea::vertical()
@@ -841,14 +855,23 @@ fn branch_picker(ui: &mut Ui, rect: Rect, repo: &mut Repo, cmds: &mut Vec<Cmd>) 
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
                     for (i, branch) in matches.iter().enumerate() {
-                        let is_current = current == Some(branch.as_str());
+                        let is_current = branch.remote.is_none() && current == Some(&branch.name);
+                        // Branches not checked out here yet say which remote has them.
+                        let origin = branch
+                            .remote
+                            .as_deref()
+                            .and_then(|r| r.strip_suffix(branch.name.as_str()))
+                            .map(|r| r.trim_end_matches('/'));
                         let clicked =
-                            menu_item(ui, Some(icon::GIT_BRANCH), branch, None, is_current)
+                            menu_item(ui, Some(icon::GIT_BRANCH), &branch.name, origin, is_current)
                                 .clicked();
                         // Enter picks the top match.
                         let via_enter = enter && i == 0 && !filter.is_empty();
                         if (clicked || via_enter) && !is_current && chosen.is_none() {
-                            chosen = Some(Action::Switch((*branch).clone()));
+                            chosen = Some(match &branch.remote {
+                                Some(remote) => Action::Track(remote.clone()),
+                                None => Action::Switch(branch.name.clone()),
+                            });
                         }
                     }
                 });
