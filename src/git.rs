@@ -341,6 +341,15 @@ pub fn discard(root: &Path, change: &Change) -> Result<()> {
     }
 }
 
+/// Throws away every unstaged change: tracked files go back to what is
+/// staged, and untracked files and folders are deleted.
+pub fn discard_all(root: &Path) -> Result<()> {
+    if has_head(root) || !run(root, &["ls-files"])?.is_empty() {
+        run(root, &["restore", "--worktree", "--", "."])?;
+    }
+    run(root, &["clean", "-fd", "-q"]).map(drop)
+}
+
 pub fn commit(root: &Path, message: &str) -> Result<()> {
     let mut cmd = command(root);
     cmd.args(["commit", "-q", "-F", "-"])
@@ -522,6 +531,217 @@ pub fn push(root: &Path, has_upstream: bool) -> Result<()> {
     } else {
         run(root, &["push", "-q", "-u", "origin", "HEAD"]).map(drop)
     }
+}
+
+// ── Search ─────────────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SearchOptions {
+    pub match_case: bool,
+    pub whole_word: bool,
+    pub regex: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchMatch {
+    /// 1-based line number.
+    pub line: u32,
+    /// 1-based column, in bytes, of the first match on the line.
+    pub column: u32,
+    /// The line, trimmed to a sensible length.
+    pub text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileMatches {
+    pub path: String,
+    pub matches: Vec<SearchMatch>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SearchResults {
+    pub files: Vec<FileMatches>,
+    pub total: usize,
+    /// More matches exist than were collected.
+    pub truncated: bool,
+}
+
+/// Stop collecting after this many matches; nobody reads further than that.
+const MAX_MATCHES: usize = 2000;
+const MAX_MATCH_LINE: usize = 400;
+
+/// Searches file contents with `git grep`, which honours `.gitignore`, skips
+/// binary files, and is fast. `cancelled` is checked as results stream in.
+pub fn search(
+    root: &Path,
+    is_git: bool,
+    query: &str,
+    options: SearchOptions,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<SearchResults> {
+    use std::io::{BufRead, BufReader};
+
+    let mut cmd = command(root);
+    cmd.args(["grep", "-n", "--column", "-I", "-z", "--no-color"]);
+    if is_git {
+        cmd.arg("--untracked");
+    } else {
+        cmd.arg("--no-index");
+    }
+    if !options.match_case {
+        cmd.arg("-i");
+    }
+    if options.whole_word {
+        cmd.arg("-w");
+    }
+    cmd.arg(if options.regex { "-E" } else { "-F" });
+    cmd.arg("-e").arg(query).args(["--", "."]);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| format!("could not run git: {e}"))?;
+    let stdout = child.stdout.take().ok_or("no output from git")?;
+
+    let mut results = SearchResults::default();
+    let mut reader = BufReader::new(stdout);
+    let mut record = Vec::new();
+    loop {
+        record.clear();
+        // One match per line: path NUL line NUL column NUL text.
+        if reader.read_until(b'\n', &mut record).unwrap_or(0) == 0 {
+            break;
+        }
+        if cancelled() || results.total >= MAX_MATCHES {
+            results.truncated = results.total >= MAX_MATCHES;
+            let _ = child.kill();
+            break;
+        }
+        let Some(found) = parse_grep_record(&record) else {
+            continue;
+        };
+        results.total += 1;
+        match results.files.last_mut() {
+            Some(file) if file.path == found.0 => file.matches.push(found.1),
+            _ => results.files.push(FileMatches {
+                path: found.0,
+                matches: vec![found.1],
+            }),
+        }
+    }
+    let status = child.wait().map_err(|e| e.to_string())?;
+    // 1 means "no matches"; anything higher is a real error (a bad pattern).
+    if results.total == 0 && status.code().is_some_and(|c| c > 1) {
+        let mut stderr = String::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            use std::io::Read;
+            let _ = pipe.read_to_string(&mut stderr);
+        }
+        let message = stderr.trim().trim_start_matches("fatal: ");
+        return Err(if message.is_empty() {
+            "The search failed.".to_owned()
+        } else {
+            message.to_owned()
+        });
+    }
+    Ok(results)
+}
+
+fn parse_grep_record(record: &[u8]) -> Option<(String, SearchMatch)> {
+    let record = record.strip_suffix(b"\n").unwrap_or(record);
+    let mut fields = record.splitn(4, |b| *b == 0);
+    let path = String::from_utf8_lossy(fields.next()?).into_owned();
+    let line = std::str::from_utf8(fields.next()?).ok()?.parse().ok()?;
+    let column = std::str::from_utf8(fields.next()?).ok()?.parse().ok()?;
+    let text = String::from_utf8_lossy(fields.next()?);
+    let text = text.trim_end_matches('\r');
+    let text = match text.char_indices().nth(MAX_MATCH_LINE) {
+        Some((cut, _)) => &text[..cut],
+        None => text,
+    };
+    Some((
+        path,
+        SearchMatch {
+            line,
+            column,
+            text: text.to_owned(),
+        },
+    ))
+}
+
+/// Every file a quick-open should offer: tracked files plus untracked ones
+/// that are not ignored.
+pub fn list_files(root: &Path) -> Result<Vec<String>> {
+    let out = run(
+        root,
+        &[
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ],
+    )?;
+    let mut files: Vec<String> = out
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .map(|p| String::from_utf8_lossy(p).into_owned())
+        .collect();
+    files.sort_unstable();
+    files.dedup();
+    Ok(files)
+}
+
+// ── Blame ──────────────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlameLine {
+    /// Abbreviated commit, or `None` for a line that is not committed yet.
+    pub commit: Option<String>,
+    pub author: String,
+    /// Seconds since the Unix epoch.
+    pub time: i64,
+    pub summary: String,
+}
+
+/// Who last changed each line of a file, one entry per line.
+pub fn blame(root: &Path, path: &str) -> Result<Vec<BlameLine>> {
+    let out = run_text(root, &["blame", "--porcelain", "--", path])?;
+    Ok(parse_blame(&out))
+}
+
+fn parse_blame(porcelain: &str) -> Vec<BlameLine> {
+    use std::collections::HashMap;
+
+    // Commit details appear once, the first time a commit is mentioned.
+    let mut commits: HashMap<String, BlameLine> = HashMap::new();
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for line in porcelain.lines() {
+        if line.starts_with('\t') {
+            // The source line itself: the header for it is complete.
+            if let Some(info) = commits.get(&current) {
+                lines.push(info.clone());
+            }
+            continue;
+        }
+        let (key, value) = line.split_once(' ').unwrap_or((line, ""));
+        if key.len() == 40 && key.bytes().all(|b| b.is_ascii_hexdigit()) {
+            current = key.to_owned();
+            let uncommitted = key.bytes().all(|b| b == b'0');
+            commits.entry(current.clone()).or_insert_with(|| BlameLine {
+                commit: (!uncommitted).then(|| key[..7].to_owned()),
+                author: String::new(),
+                time: 0,
+                summary: String::new(),
+            });
+        } else if let Some(info) = commits.get_mut(&current) {
+            match key {
+                "author" => info.author = value.to_owned(),
+                "author-time" => info.time = value.parse().unwrap_or(0),
+                "summary" => info.summary = value.to_owned(),
+                _ => {}
+            }
+        }
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -739,6 +959,100 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
         assert_eq!(
             find_root(&root.join(".")).map(|p| p.canonicalize().unwrap()),
             Some(root.canonicalize().unwrap())
+        );
+    }
+
+    #[test]
+    fn searches_blames_lists_and_discards_everything() {
+        let repo = TempRepo::new("search");
+        let root = &repo.0;
+        repo.write("src/a.rs", "fn main() {\n    let Needle = 1;\n}\n");
+        repo.write(
+            "notes.txt",
+            "a needle in a haystack\nno match here\nneedles\n",
+        );
+        repo.write(".gitignore", "ignored/\n");
+        repo.write("ignored/x.txt", "needle\n");
+        stage_all(root).unwrap();
+        commit(root, "first").unwrap();
+        repo.write("new.txt", "untracked needle\n");
+
+        let never = || false;
+        let find = |query: &str, options: SearchOptions| {
+            search(root, true, query, options, &never).unwrap()
+        };
+        // Case-insensitive by default; untracked files count, ignored ones don't.
+        let all = find("needle", SearchOptions::default());
+        let paths: Vec<_> = all.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["new.txt", "notes.txt", "src/a.rs"]);
+        assert_eq!(all.total, 4);
+        let code = &all.files[2].matches[0];
+        assert_eq!((code.line, code.column), (2, 9));
+        assert_eq!(code.text, "    let Needle = 1;");
+
+        let exact = find(
+            "Needle",
+            SearchOptions {
+                match_case: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(exact.total, 1);
+        let words = find(
+            "needle",
+            SearchOptions {
+                whole_word: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(words.total, 3, "\"needles\" is not the whole word");
+        let pattern = find(
+            "ne+dles?$",
+            SearchOptions {
+                regex: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(pattern.total, 2);
+        assert_eq!(find("nothing-like-this", SearchOptions::default()).total, 0);
+        assert!(
+            search(
+                root,
+                true,
+                "(",
+                SearchOptions {
+                    regex: true,
+                    ..Default::default()
+                },
+                &never
+            )
+            .is_err()
+        );
+
+        let files = list_files(root).unwrap();
+        assert_eq!(files, [".gitignore", "new.txt", "notes.txt", "src/a.rs"]);
+
+        let who = blame(root, "notes.txt").unwrap();
+        assert_eq!(who.len(), 3);
+        assert_eq!(who[0].author, "Test");
+        assert_eq!(who[0].summary, "first");
+        assert!(who[0].commit.is_some() && who[0].time > 0);
+
+        // Discard all: edits are reverted and untracked files removed.
+        repo.write("notes.txt", "changed\n");
+        repo.write("dir/extra.txt", "x\n");
+        assert_eq!(repo.status().unstaged.len(), 3);
+        discard_all(root).unwrap();
+        assert!(repo.status().unstaged.is_empty());
+        assert!(!root.join("new.txt").exists() && !root.join("dir").exists());
+        assert!(
+            root.join("ignored/x.txt").exists(),
+            "ignored files are left alone"
+        );
+        assert!(
+            std::fs::read_to_string(root.join("notes.txt"))
+                .unwrap()
+                .starts_with("a needle")
         );
     }
 

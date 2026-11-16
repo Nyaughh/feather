@@ -142,6 +142,21 @@ fn bar(
         cmds.push(Cmd::ToggleSettings);
     }
     right -= 34.0;
+    if repo.is_some() {
+        let tip = format!("Terminal ({})", shortcut_text(&ctx, egui::Key::Backtick));
+        if icon_button(
+            ui,
+            button(right - 14.0),
+            Id::unique("toggle_terminal"),
+            icon::TERMINAL,
+            &tip,
+        )
+        .clicked()
+        {
+            cmds.push(Cmd::ToggleTerminal);
+        }
+        right -= 34.0;
+    }
     if let update::State::Available(release) | update::State::Ready(release) = &updater.state {
         let tip = format!("Feather {} is available", release.version);
         let slot = button(right - 14.0);

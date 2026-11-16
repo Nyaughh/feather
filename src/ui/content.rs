@@ -11,15 +11,18 @@ use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::virtual_rows;
-use super::widgets::{ButtonKind, button, empty_state, paint_galley, segmented};
-use crate::app::{Cmd, DiffView, EditBuffer, FileView, Repo, View};
+use super::widgets::{
+    ButtonKind, button, elided, empty_state, icon_button, paint_galley, segmented,
+};
+use super::{virtual_rows, virtual_rows_from};
+use crate::app::{Cmd, DiffView, EditBuffer, FileView, FindBar, Jump, Repo, View};
 use crate::diff::{Diff, DiffLine, LineKind};
 use crate::document::{self, Body, Highlights, LoadedFile, Preview, Span, TextDoc};
 use crate::git::ChangeKind;
 use crate::settings::Settings;
 use crate::theme::{self, HEADER_HEIGHT, icon, syntax};
 use crate::worker::Action;
+use eframe::egui::text::{CCursor, CCursorRange};
 
 pub fn show(
     ui: &mut Ui,
@@ -41,7 +44,19 @@ pub fn show(
         }
         View::File(view) => {
             file_header(ui, view, cmds);
-            file_body(ui, view, settings, markdown, cmds);
+            if matches!(view.file.as_ref().map(|f| &f.body), Some(Body::Text(_))) {
+                egui::Panel::bottom("status_bar")
+                    .exact_size(STATUS_HEIGHT)
+                    .frame(Frame::new())
+                    .show_separator_line(false)
+                    .show(ui, |ui| status_bar(ui, view, settings));
+            }
+            egui::CentralPanel::default()
+                .frame(Frame::new())
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                    file_body(ui, view, settings, markdown, cmds);
+                });
         }
         View::Diff(view) => {
             diff_header(ui, view, idle, cmds);
@@ -263,6 +278,10 @@ fn file_body(
         file,
         preview,
         edit,
+        jump,
+        find,
+        cursor,
+        cursor_index,
         ..
     } = view;
     let Some(file) = file else { return };
@@ -276,9 +295,20 @@ fn file_body(
             }
             (true, Preview::Svg) => image_view(ui, rel, &file.uri()),
             _ => match edit {
-                Some(buffer) => editor_view(ui, rel, buffer, settings, cmds),
+                Some(buffer) => {
+                    if find.is_some() {
+                        find_bar(ui, buffer, find, jump);
+                    }
+                    let state = EditorState {
+                        jump,
+                        find: find.as_ref(),
+                        cursor,
+                        cursor_index,
+                    };
+                    editor_view(ui, rel, buffer, state, settings, cmds);
+                }
                 None if doc.lines.is_empty() => empty_state(ui, icon::FILE, "Empty file", None),
-                None => code_view(ui, rel, doc, settings),
+                None => code_view(ui, rel, doc, jump, settings),
             },
         },
         Body::Image => image_view(ui, rel, &file.uri()),
@@ -369,10 +399,193 @@ fn edit_job(
     job
 }
 
+/// The parts of a file view the editor reads and updates besides the text.
+struct EditorState<'a> {
+    jump: &'a mut Option<Jump>,
+    find: Option<&'a FindBar>,
+    cursor: &'a mut Option<(usize, usize)>,
+    cursor_index: &'a mut Option<(u64, usize)>,
+}
+
+/// The byte range of the text a jump refers to.
+fn jump_range(text: &str, jump: &Jump) -> std::ops::Range<usize> {
+    let clamp = |i: usize| {
+        let mut i = i.min(text.len());
+        while !text.is_char_boundary(i) {
+            i -= 1;
+        }
+        i
+    };
+    match jump {
+        Jump::Bytes(range) => clamp(range.start)..clamp(range.end),
+        Jump::Line { line, column, len } => {
+            let line_start = text
+                .split_inclusive('\n')
+                .take(line.saturating_sub(1))
+                .map(str::len)
+                .sum::<usize>();
+            let line_len = text[line_start.min(text.len())..]
+                .find('\n')
+                .unwrap_or(text.len() - line_start.min(text.len()));
+            let start = line_start + column.saturating_sub(1).min(line_len);
+            clamp(start)..clamp((start + len).min(line_start + line_len))
+        }
+    }
+}
+
+/// Every place `query` occurs in `text`, as byte ranges.
+fn find_all(text: &str, query: &str, match_case: bool) -> Vec<std::ops::Range<usize>> {
+    const LIMIT: usize = 10_000;
+    if query.is_empty() {
+        return Vec::new();
+    }
+    // ASCII-only folding keeps byte offsets the same in both strings.
+    let (haystack, needle);
+    let (haystack, needle) = if match_case {
+        (text, query)
+    } else {
+        haystack = text.to_ascii_lowercase();
+        needle = query.to_ascii_lowercase();
+        (haystack.as_str(), needle.as_str())
+    };
+    haystack
+        .match_indices(needle)
+        .take(LIMIT)
+        .map(|(start, found)| start..start + found.len())
+        .collect()
+}
+
+/// The strip above the editor for finding text in the open file.
+fn find_bar(ui: &mut Ui, buffer: &EditBuffer, slot: &mut Option<FindBar>, jump: &mut Option<Jump>) {
+    let Some(find) = slot else { return };
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
+    ui.painter().hline(
+        rect.x_range(),
+        rect.bottom() - 0.5,
+        Stroke::new(1.0, theme::border()),
+    );
+    let mut step: Option<bool> = None;
+    let mut close = false;
+    let mut edited = false;
+
+    let mut child = ui.new_child(
+        UiBuilder::new()
+            .max_rect(rect.shrink2(vec2(12.0, 5.0)))
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    let ui = &mut child;
+    ui.spacing_mut().item_spacing.x = 6.0;
+    let id = Id::unique("find_field");
+    Frame::new()
+        .fill(theme::bg_input())
+        .stroke(Stroke::new(1.0, theme::border_strong()))
+        .corner_radius(CornerRadius::same(theme::radius()))
+        .inner_margin(Margin::symmetric(8, 0))
+        .show(ui, |ui| {
+            let field = ui.add(
+                TextEdit::singleline(&mut find.query)
+                    .id(id)
+                    .hint_text("Find in file")
+                    .desired_width(240.0)
+                    .frame(Frame::new()),
+            );
+            if std::mem::take(&mut find.focus) {
+                field.request_focus();
+            }
+            edited = field.changed();
+            // Enter moves on to the next match and keeps the field focused.
+            if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                step = Some(!ui.input(|i| i.modifiers.shift));
+                field.request_focus();
+            }
+            if field.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                close = true;
+            }
+        });
+    let case_before = find.match_case;
+    let case = ui
+        .selectable_label(find.match_case, "Aa")
+        .on_hover_text("Match case");
+    if case.clicked() {
+        find.match_case = !find.match_case;
+    }
+
+    // Look again whenever the text, the query or the option changed.
+    let wanted = (buffer.version, find.query.clone(), find.match_case);
+    if find.computed_for.as_ref() != Some(&wanted) {
+        find.matches = find_all(&buffer.text, &find.query, find.match_case);
+        find.computed_for = Some(wanted);
+        find.current = find.current.min(find.matches.len().saturating_sub(1));
+        if edited || case_before != find.match_case {
+            find.current = 0;
+            if let Some(first) = find.matches.first() {
+                *jump = Some(Jump::Bytes(first.clone()));
+            }
+        }
+    }
+
+    let count = find.matches.len();
+    ui.label(
+        egui::RichText::new(if find.query.is_empty() {
+            String::new()
+        } else if count == 0 {
+            "No results".to_owned()
+        } else {
+            format!("{} of {count}", find.current + 1)
+        })
+        .size(12.0)
+        .color(theme::text_muted()),
+    );
+    let slot_for = |ui: &mut Ui| ui.allocate_exact_size(vec2(24.0, 24.0), Sense::hover()).0;
+    let previous = slot_for(ui);
+    if icon_button(
+        ui,
+        previous,
+        Id::unique("find_previous"),
+        icon::ARROW_UP,
+        "Previous match",
+    )
+    .clicked()
+    {
+        step = Some(false);
+    }
+    let next = slot_for(ui);
+    if icon_button(
+        ui,
+        next,
+        Id::unique("find_next"),
+        icon::ARROW_DOWN,
+        "Next match",
+    )
+    .clicked()
+    {
+        step = Some(true);
+    }
+    let shut = slot_for(ui);
+    if icon_button(ui, shut, Id::unique("find_close"), icon::CLOSE, "Close").clicked() {
+        close = true;
+    }
+
+    if let Some(forward) = step
+        && count > 0
+    {
+        find.current = if forward {
+            (find.current + 1) % count
+        } else {
+            (find.current + count - 1) % count
+        };
+        *jump = Some(Jump::Bytes(find.matches[find.current].clone()));
+    }
+    if close {
+        *slot = None;
+    }
+}
+
 fn editor_view(
     ui: &mut Ui,
     rel: &str,
     buffer: &mut EditBuffer,
+    state: EditorState<'_>,
     settings: &Settings,
     cmds: &mut Vec<Cmd>,
 ) {
@@ -381,6 +594,25 @@ fn editor_view(
     let gutter = gutter_width(buffer.line_count, char_w, settings);
     let wrap = settings.line_wrap;
     let id = Id::unique(("editor", rel, buffer.load_id));
+
+    // Move the cursor where a search result or find asked for it.
+    let mut reveal: Option<CCursor> = None;
+    if let Some(jump) = state.jump.take() {
+        let range = jump_range(&buffer.text, &jump);
+        let start = buffer.text[..range.start].chars().count();
+        let end = start + buffer.text[range].chars().count();
+        let mut edit = TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+        edit.cursor.set_char_range(Some(CCursorRange::two(
+            CCursor::new(start),
+            CCursor::new(end),
+        )));
+        TextEdit::store_state(ui.ctx(), id, edit);
+        // While finding, the keyboard stays in the find field.
+        if state.find.is_none() {
+            ui.memory_mut(|m| m.request_focus(id));
+        }
+        reveal = Some(CCursor::new(start));
+    }
 
     // Tab inserts spaces when asked to, rather than a tab character.
     if settings.insert_spaces && ui.memory(|m| m.has_focus(id)) {
@@ -467,6 +699,58 @@ fn editor_view(
             if output.response.changed() {
                 cmds.push(Cmd::Edited);
             }
+            let origin = output.galley_pos.to_vec2();
+            if let Some(cursor) = reveal {
+                let spot = output.galley.pos_from_cursor(cursor).translate(origin);
+                ui.scroll_to_rect(spot.expand2(vec2(80.0, 60.0)), Some(Align::Center));
+            }
+
+            // Where the cursor is, for the status bar. Counted only when it moves.
+            let index = output.cursor_range.map(|range| range.primary.index.0);
+            let key = index.map(|index| (*highlight_stamp ^ (text.len() as u64) << 20, index));
+            if *state.cursor_index != key {
+                *state.cursor_index = key;
+                *state.cursor = index.map(|index| {
+                    let (mut line, mut column) = (1, 1);
+                    for c in text.chars().take(index) {
+                        if c == '\n' {
+                            line += 1;
+                            column = 1;
+                        } else {
+                            column += 1;
+                        }
+                    }
+                    (line, column)
+                });
+            }
+
+            // Mark what find-in-file found: every match faintly, the current one more.
+            if let Some(find) = state.find
+                && find.matches.len() <= 2000
+            {
+                let clip = ui.clip_rect();
+                for (i, found) in find.matches.iter().enumerate() {
+                    let Some(before) = text.get(..found.start) else {
+                        continue;
+                    };
+                    // Cheap rejection before the exact position is worked out.
+                    let from = CCursor::new(before.chars().count());
+                    let top = output.galley.pos_from_cursor(from).translate(origin);
+                    if top.bottom() < clip.top() || top.top() > clip.bottom() {
+                        continue;
+                    }
+                    let chars = text[found.clone()].chars().count();
+                    let to = CCursor::new(from.index.0 + chars);
+                    let end = output.galley.pos_from_cursor(to).translate(origin);
+                    let rect = Rect::from_min_max(top.left_top(), end.right_bottom());
+                    let alpha = if i == find.current { 0.55 } else { 0.22 };
+                    ui.painter().rect_filled(
+                        rect,
+                        CornerRadius::same(2),
+                        theme::yellow().gamma_multiply(alpha),
+                    );
+                }
+            }
 
             // Line numbers, pinned to the left edge while the code scrolls.
             let clip = ui.clip_rect();
@@ -539,14 +823,19 @@ fn code_label(ui: &mut Ui, rect: Rect, job: LayoutJob) {
 
 /// The read-only viewer, for files that are too large to edit. Only the rows
 /// on screen are laid out, so size does not matter here.
-fn code_view(ui: &mut Ui, rel: &str, doc: &TextDoc, settings: &Settings) {
+fn code_view(ui: &mut Ui, rel: &str, doc: &TextDoc, jump: &mut Option<Jump>, settings: &Settings) {
+    // A search result in a file this big can only be scrolled to.
+    let scroll_to = jump.take().and_then(|jump| match jump {
+        Jump::Line { line, .. } => Some((line.saturating_sub(4)) as f32 * theme::code_row_height()),
+        Jump::Bytes(_) => None,
+    });
     let font = theme::code_font();
     let char_w = char_width(ui, &font);
     let gutter = gutter_width(doc.lines.len(), char_w, settings);
     let content_width = gutter + doc.max_chars as f32 * char_w + 32.0;
     let highlights = doc.highlights.as_deref();
 
-    virtual_rows(
+    virtual_rows_from(
         ui,
         Id::unique(("code", rel)),
         true,
@@ -554,6 +843,7 @@ fn code_view(ui: &mut Ui, rel: &str, doc: &TextDoc, settings: &Settings) {
         doc.lines.len(),
         content_width,
         10.0,
+        scroll_to,
         |ui, i, rect| {
             let spans = highlights.and_then(|h| h.get(i)).map(Vec::as_slice);
             let text_rect = Rect::from_min_max(pos2(rect.left() + gutter, rect.top()), rect.max);
@@ -659,6 +949,95 @@ fn markdown_view(
             });
             ui.add_space(56.0);
         });
+}
+
+// ── Status bar ─────────────────────────────────────────────────────────────
+
+const STATUS_HEIGHT: f32 = 26.0;
+
+/// "3 days ago", from a Unix timestamp.
+fn time_ago(then: i64, now: i64) -> String {
+    let seconds = (now - then).max(0);
+    let (count, unit) = match seconds {
+        0..60 => return "just now".to_owned(),
+        60..3_600 => (seconds / 60, "minute"),
+        3_600..86_400 => (seconds / 3_600, "hour"),
+        86_400..2_592_000 => (seconds / 86_400, "day"),
+        2_592_000..31_536_000 => (seconds / 2_592_000, "month"),
+        _ => (seconds / 31_536_000, "year"),
+    };
+    format!("{count} {unit}{} ago", if count == 1 { "" } else { "s" })
+}
+
+/// The strip under a file: cursor position, who last changed the current
+/// line, and how the file is indented and terminated.
+fn status_bar(ui: &mut Ui, view: &FileView, settings: &Settings) {
+    let rect = ui.max_rect();
+    ui.allocate_rect(rect, Sense::hover());
+    ui.painter().hline(
+        rect.x_range(),
+        rect.top() + 0.5,
+        Stroke::new(1.0, theme::border()),
+    );
+    let mid = rect.center().y + 0.5;
+    let font = theme::ui_font(11.5);
+    let muted = theme::text_muted();
+
+    // Right side first, so the blame text knows how much room is left.
+    let mut right = rect.right() - 14.0;
+    let mut right_label = |ui: &Ui, text: String| {
+        let galley = ui.painter().layout_no_wrap(text, font.clone(), muted);
+        right -= galley.size().x;
+        paint_galley(ui, right, mid, galley);
+        right -= 16.0;
+    };
+    if let Some(buffer) = &view.edit {
+        right_label(ui, if buffer.crlf() { "CRLF" } else { "LF" }.to_owned());
+        right_label(
+            ui,
+            if settings.insert_spaces {
+                format!("Spaces: {}", settings.tab_size)
+            } else {
+                "Tabs".to_owned()
+            },
+        );
+    } else {
+        right_label(ui, "Read-only".to_owned());
+    }
+
+    let mut x = rect.left() + 16.0;
+    let Some((line, column)) = view.cursor.filter(|_| view.edit.is_some()) else {
+        return;
+    };
+    let position = ui.painter().layout_no_wrap(
+        format!("Ln {line}, Col {column}"),
+        font.clone(),
+        theme::text_secondary(),
+    );
+    x += paint_galley(ui, x, mid, position) + 18.0;
+
+    // Blame describes the saved file, so it is hidden while there are edits.
+    let blame = view
+        .blame
+        .as_ref()
+        .filter(|_| !view.is_dirty())
+        .and_then(|lines| lines.get(line - 1));
+    if let Some(blame) = blame {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        let text = match &blame.commit {
+            Some(_) => format!(
+                "{}, {} · {}",
+                blame.author,
+                time_ago(blame.time, now),
+                blame.summary
+            ),
+            None => "Not committed yet".to_owned(),
+        };
+        let galley = elided(ui, &text, font, muted, right - x);
+        paint_galley(ui, x, mid, galley);
+    }
 }
 
 // ── Diff body ──────────────────────────────────────────────────────────────

@@ -9,8 +9,11 @@ use std::time::Duration;
 
 use crate::diff::Diff;
 use crate::document::{self, Body, Highlights, LoadedFile, Preview, Span, TextDoc};
-use crate::git::{self, Branch, Change, ChangeKind, Status, Worktree};
+use crate::git::{
+    self, BlameLine, Branch, Change, ChangeKind, SearchOptions, SearchResults, Status, Worktree,
+};
 use crate::settings::Settings;
+use crate::terminal::Terminals;
 use crate::tree::Tree;
 use crate::update::{self, Updater};
 use crate::worker::{Action, Event, Watch, Worker};
@@ -41,8 +44,25 @@ pub enum Cmd {
     Save,
     /// Throw away unsaved edits and read the file from disk again.
     ReloadFile,
+    /// Open a file and put the cursor somewhere in it.
+    OpenAt {
+        rel: String,
+        jump: Jump,
+    },
+    /// Show the Search tab with its field focused.
+    FocusSearch,
+    ToggleQuickOpen,
+    /// Show or hide find-in-file.
+    ToggleFind,
+    ToggleTerminal,
+    NewTerminal,
+    CloseTerminal(usize),
+    SelectTerminal(usize),
+    AskDiscardAll,
     ToggleSidebar,
     ToggleSettings,
+    /// Open the dialog for pasting in a theme.
+    ImportTheme,
     CheckForUpdates,
     InstallUpdate,
     RestartToUpdate,
@@ -58,7 +78,7 @@ impl Cmd {
     /// Whether carrying this out would drop what is in the editor.
     fn leaves_file(&self, current: Option<&str>) -> bool {
         match self {
-            Self::OpenFile(rel) => current != Some(rel.as_str()),
+            Self::OpenFile(rel) | Self::OpenAt { rel, .. } => current != Some(rel.as_str()),
             Self::OpenRepo(_) | Self::OpenDiff { .. } | Self::Quit | Self::RestartToUpdate => true,
             _ => false,
         }
@@ -68,7 +88,60 @@ impl Cmd {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Files,
+    Search,
     Git,
+}
+
+/// Where the editor should put the cursor (and scroll to).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Jump {
+    /// A 1-based line and byte column, selecting `len` bytes from there.
+    Line {
+        line: usize,
+        column: usize,
+        len: usize,
+    },
+    /// A byte range of the text.
+    Bytes(std::ops::Range<usize>),
+}
+
+/// Find-in-file: what is being looked for and where it was found.
+#[derive(Default)]
+pub struct FindBar {
+    pub query: String,
+    pub match_case: bool,
+    /// Byte ranges of every match in the editor's text.
+    pub matches: Vec<std::ops::Range<usize>>,
+    pub current: usize,
+    /// What `matches` was computed for: (hash of the text, query, case).
+    pub computed_for: Option<(u64, String, bool)>,
+    /// Put the keyboard focus in the field on the next frame.
+    pub focus: bool,
+}
+
+/// The Search tab: a query, its options, and the matches across the repository.
+#[derive(Default)]
+pub struct SearchState {
+    pub query: String,
+    pub options: SearchOptions,
+    pub results: Option<Result<SearchResults, String>>,
+    pub searching: bool,
+    /// When the query last changed and has not been searched for yet.
+    pub changed_at: Option<f64>,
+    /// Put the keyboard focus in the field on the next frame.
+    pub focus: bool,
+    token: u64,
+}
+
+/// Quick open: type part of a file name, pick from the matches.
+#[derive(Default)]
+pub struct QuickOpen {
+    pub query: String,
+    pub selected: usize,
+    /// The best matches, best first.
+    pub results: Vec<String>,
+    /// The query and file count `results` was worked out for.
+    pub ranked_for: Option<(String, usize)>,
 }
 
 /// Identifies a laid-out version of the editor text; see [`EditBuffer::layout`].
@@ -124,6 +197,11 @@ impl EditBuffer {
         buffer
     }
 
+    /// Whether the file uses Windows line endings.
+    pub fn crlf(&self) -> bool {
+        self.crlf
+    }
+
     fn count_lines(&mut self) {
         self.line_count = self.text.bytes().filter(|b| *b == b'\n').count() + 1;
     }
@@ -151,6 +229,15 @@ pub struct FileView {
     pub preview: bool,
     /// Present when the file can be edited.
     pub edit: Option<EditBuffer>,
+    /// A pending request to move the cursor, applied once the text is shown.
+    pub jump: Option<Jump>,
+    pub find: Option<FindBar>,
+    /// Who last changed each line, as of the last save.
+    pub blame: Option<Vec<BlameLine>>,
+    /// The cursor's 1-based line and column, for the status bar.
+    pub cursor: Option<(usize, usize)>,
+    /// The character index `cursor` was worked out from.
+    pub cursor_index: Option<(u64, usize)>,
 }
 
 impl FileView {
@@ -247,7 +334,13 @@ pub struct Repo {
     /// Label of the git action currently running, if any.
     pub busy: Option<&'static str>,
     pub confirm_discard: Option<Change>,
+    pub confirm_discard_all: bool,
     pub branch_filter: String,
+    pub search: SearchState,
+    /// Every file in the repository, once quick open has asked for them.
+    pub files: Option<Vec<String>>,
+    pub quick_open: Option<QuickOpen>,
+    pub terminals: Terminals,
 }
 
 impl Repo {
@@ -277,7 +370,12 @@ impl Repo {
             commit_message: String::new(),
             busy: None,
             confirm_discard: None,
+            confirm_discard_all: false,
             branch_filter: String::new(),
+            search: SearchState::default(),
+            files: None,
+            quick_open: None,
+            terminals: Terminals::default(),
         };
         repo.worker.refresh();
         // Land on the README, the way a repository page would.
@@ -322,7 +420,33 @@ impl Repo {
             token,
             file: None,
             edit: None,
+            jump: None,
+            find: None,
+            blame: None,
+            cursor: None,
+            cursor_index: None,
         });
+    }
+
+    /// Opens a file (if it is not open already) and moves the cursor.
+    fn open_at(&mut self, rel: String, jump: Jump) {
+        self.open_file(rel);
+        if let View::File(view) = &mut self.view {
+            view.preview = false;
+            view.jump = Some(jump);
+        }
+    }
+
+    fn run_search(&mut self) {
+        self.search.changed_at = None;
+        let query = self.search.query.clone();
+        if query.trim().is_empty() {
+            self.search.results = None;
+            self.search.searching = false;
+            return;
+        }
+        self.search.searching = true;
+        self.search.token = self.worker.search(query, self.search.options);
     }
 
     fn open_diff(&mut self, change: Change, staged: bool) {
@@ -392,6 +516,7 @@ impl Repo {
             rel: view.rel.clone(),
             stamp: file.stamp,
         });
+        self.worker.blame(&view.rel);
         self.worker.refresh();
         Ok(())
     }
@@ -499,6 +624,9 @@ impl Repo {
                         Body::Text(doc) if doc.editable => Some(EditBuffer::new(doc, token)),
                         _ => None,
                     };
+                    if matches!(file.body, Body::Text(_)) {
+                        self.worker.blame(&view.rel);
+                    }
                     view.file = Some(file);
                 }
             }
@@ -515,6 +643,20 @@ impl Repo {
                         buffer.set_highlights(0, highlights.clone());
                     }
                     doc.highlights = Some(highlights);
+                }
+            }
+            Event::Search { token, result } => {
+                if token == self.search.token {
+                    self.search.searching = false;
+                    self.search.results = Some(result);
+                }
+            }
+            Event::Files(files) => self.files = Some(files),
+            Event::Blame { rel, lines } => {
+                if let View::File(view) = &mut self.view
+                    && view.rel == rel
+                {
+                    view.blame = Some(lines);
                 }
             }
             Event::EditHighlights {
@@ -574,8 +716,17 @@ impl Toast {
     }
 }
 
+/// What has been typed into the "import a theme" dialog.
+#[derive(Default)]
+pub struct ThemeImport {
+    pub name: String,
+    pub css: String,
+    pub error: Option<String>,
+}
+
 pub struct App {
     pub settings: Settings,
+    pub theme_import: Option<ThemeImport>,
     pub repo: Option<Repo>,
     pub toast: Option<Toast>,
     pub markdown: CommonMarkCache,
@@ -607,6 +758,7 @@ impl App {
 
         let mut app = Self {
             settings,
+            theme_import: None,
             repo: None,
             toast: None,
             markdown: CommonMarkCache::default(),
@@ -680,6 +832,17 @@ impl App {
                 repo.handle(event, &mut self.toast, ctx);
             }
             repo.worker.set_auto_fetch(self.settings.auto_fetch);
+            repo.terminals.pump();
+
+            // Search a moment after typing stops, not on every keystroke.
+            if let Some(changed) = repo.search.changed_at {
+                let wait = changed + 0.25 - now;
+                if wait > 0.0 {
+                    ctx.request_repaint_after(Duration::from_secs_f64(wait));
+                } else {
+                    repo.run_search();
+                }
+            }
             if focused != self.was_focused {
                 // The worker only polls for outside changes while we have focus;
                 // catch up on anything missed as soon as it comes back.
@@ -749,27 +912,54 @@ impl App {
     fn shortcuts(&mut self, ctx: &egui::Context, cmds: &mut Vec<Cmd>) {
         use egui::{Key, KeyboardShortcut, Modifiers};
         let shortcut = |key| KeyboardShortcut::new(Modifiers::COMMAND, key);
-        let table = [
-            (shortcut(Key::O), Cmd::PickRepo),
-            (shortcut(Key::R), Cmd::Refresh),
-            (shortcut(Key::S), Cmd::Save),
-            (shortcut(Key::B), Cmd::ToggleSidebar),
-            (shortcut(Key::Comma), Cmd::ToggleSettings),
-        ];
+        let shifted = |key| KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, key);
+
+        // Where Ctrl is the shortcut key, a focused terminal needs most of
+        // these combinations for itself (Ctrl+R, Ctrl+P, Ctrl+F and so on).
+        let terminal_has_keys = !cfg!(target_os = "macos")
+            && self
+                .repo
+                .as_ref()
+                .is_some_and(|r| r.terminals.open && r.terminals.focused);
+
         ctx.input_mut(|i| {
+            if i.consume_shortcut(&shortcut(Key::Backtick)) {
+                cmds.push(Cmd::ToggleTerminal);
+            }
+            if i.consume_shortcut(&shifted(Key::Backtick)) {
+                cmds.push(Cmd::NewTerminal);
+            }
+            // Shift variants first: a plain Ctrl+F pattern also matches Ctrl+Shift+F.
+            if i.consume_shortcut(&shifted(Key::F)) {
+                cmds.push(Cmd::FocusSearch);
+            }
+            if terminal_has_keys {
+                return;
+            }
+            let table = [
+                (shortcut(Key::O), Cmd::PickRepo),
+                (shortcut(Key::R), Cmd::Refresh),
+                (shortcut(Key::S), Cmd::Save),
+                (shortcut(Key::B), Cmd::ToggleSidebar),
+                (shortcut(Key::P), Cmd::ToggleQuickOpen),
+                (shortcut(Key::F), Cmd::ToggleFind),
+                (shortcut(Key::Comma), Cmd::ToggleSettings),
+            ];
             for (keys, cmd) in table {
                 if i.consume_shortcut(&keys) {
                     cmds.push(cmd);
                 }
             }
             if let Some(repo) = &mut self.repo {
-                if i.consume_shortcut(&shortcut(Key::Num1)) {
-                    repo.tab = Tab::Files;
-                    self.settings.sidebar_open = true;
-                }
-                if i.consume_shortcut(&shortcut(Key::Num2)) && repo.is_git {
-                    repo.tab = Tab::Git;
-                    self.settings.sidebar_open = true;
+                for (key, tab) in [
+                    (Key::Num1, Tab::Files),
+                    (Key::Num2, Tab::Search),
+                    (Key::Num3, Tab::Git),
+                ] {
+                    if i.consume_shortcut(&shortcut(key)) && (tab != Tab::Git || repo.is_git) {
+                        repo.tab = tab;
+                        self.settings.sidebar_open = true;
+                    }
                 }
                 if repo.tab == Tab::Git && i.consume_shortcut(&shortcut(Key::Enter)) {
                     cmds.push(Cmd::Commit);
@@ -815,6 +1005,7 @@ impl App {
             }
             (Cmd::ToggleSidebar, _) => self.settings.sidebar_open = !self.settings.sidebar_open,
             (Cmd::ToggleSettings, _) => self.settings_open = !self.settings_open,
+            (Cmd::ImportTheme, _) => self.theme_import = Some(ThemeImport::default()),
             (Cmd::CheckForUpdates, _) => self.updater.check(true),
             (Cmd::InstallUpdate, _) => self.updater.install(),
             (Cmd::RestartToUpdate, _) => match self.updater.relaunch() {
@@ -848,6 +1039,58 @@ impl App {
                 }
             }
             (Cmd::OpenFile(rel), Some(repo)) => repo.open_file(rel),
+            (Cmd::OpenAt { rel, jump }, Some(repo)) => repo.open_at(rel, jump),
+            (Cmd::FocusSearch, Some(repo)) => {
+                repo.tab = Tab::Search;
+                repo.search.focus = true;
+                self.settings.sidebar_open = true;
+            }
+            (Cmd::ToggleQuickOpen, Some(repo)) => {
+                if repo.quick_open.take().is_none() {
+                    repo.quick_open = Some(QuickOpen::default());
+                    // Fetched each time, so new files are there to be found.
+                    repo.worker.list_files();
+                }
+            }
+            (Cmd::ToggleFind, Some(repo)) => {
+                if let View::File(view) = &mut repo.view
+                    && view.edit.is_some()
+                {
+                    view.preview = false;
+                    match &mut view.find {
+                        // Pressing it again goes back to the field.
+                        Some(find) => find.focus = true,
+                        None => {
+                            view.find = Some(FindBar {
+                                focus: true,
+                                ..FindBar::default()
+                            });
+                        }
+                    }
+                }
+            }
+            (Cmd::ToggleTerminal, Some(repo)) => {
+                if repo.terminals.list.is_empty() {
+                    if let Err(e) = repo.terminals.add(&repo.root, &self.settings.shell, ctx) {
+                        self.toast = Some(Toast::error(e, now));
+                    }
+                } else {
+                    repo.terminals.open = !repo.terminals.open;
+                }
+                repo.terminals.grab_focus = repo.terminals.open;
+            }
+            (Cmd::NewTerminal, Some(repo)) => {
+                if let Err(e) = repo.terminals.add(&repo.root, &self.settings.shell, ctx) {
+                    self.toast = Some(Toast::error(e, now));
+                }
+                repo.terminals.grab_focus = true;
+            }
+            (Cmd::CloseTerminal(index), Some(repo)) => repo.terminals.close(index),
+            (Cmd::SelectTerminal(index), Some(repo)) => {
+                repo.terminals.active = index.min(repo.terminals.list.len().saturating_sub(1));
+                repo.terminals.grab_focus = true;
+            }
+            (Cmd::AskDiscardAll, Some(repo)) => repo.confirm_discard_all = true,
             (Cmd::OpenDiff { change, staged }, Some(repo)) => repo.open_diff(change, staged),
             (Cmd::Act(action), Some(repo)) => repo.run(action),
             (Cmd::Commit, Some(repo)) => {
