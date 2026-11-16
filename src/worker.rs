@@ -111,6 +111,12 @@ pub enum Event {
     FileChanged {
         rel: String,
     },
+    /// Syntax colors for text being edited, as it stood at `version`.
+    EditHighlights {
+        rel: String,
+        version: u64,
+        highlights: Highlights,
+    },
 }
 
 /// State shared between the UI and the git thread.
@@ -151,6 +157,8 @@ pub struct Worker {
     shared: Arc<Shared>,
     /// Token of the most recent file request; older loads abandon their work.
     file_generation: Arc<AtomicU64>,
+    /// Likewise for re-highlighting text as it is edited.
+    edit_generation: Arc<AtomicU64>,
     next_token: u64,
 }
 
@@ -183,6 +191,7 @@ impl Worker {
             events,
             shared,
             file_generation: Arc::new(AtomicU64::new(0)),
+            edit_generation: Arc::new(AtomicU64::new(0)),
             next_token: 1,
         }
     }
@@ -243,6 +252,23 @@ impl Worker {
         } else {
             let _ = self.jobs.send(Job::Act(action));
         }
+    }
+
+    /// Re-highlights text that is being edited. A newer request cancels this one.
+    pub fn highlight_edit(&mut self, rel: &str, text: String, version: u64) {
+        let token = self.token();
+        self.edit_generation.store(token, Ordering::Relaxed);
+        let generation = self.edit_generation.clone();
+        let (outbox, rel) = (self.outbox.clone(), rel.to_owned());
+        thread::spawn(move || {
+            if let Some(highlights) = document::highlight_text(&text, &rel, &generation, token) {
+                outbox.send(Event::EditHighlights {
+                    rel,
+                    version,
+                    highlights,
+                });
+            }
+        });
     }
 
     /// Loads a file for the viewer.

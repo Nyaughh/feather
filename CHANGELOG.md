@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0
+
+- **Edit files**: click into any text file and type. Save with Ctrl+S (Cmd+S on macOS), or turn on auto save. Feather asks before dropping unsaved changes.
+- **Its own title bar**: the window buttons and a sidebar toggle now sit in a bar that matches the rest of the app.
+- **Settings**: dark, light or system theme, accent colour, interface size, code font size, line wrap, line numbers, indentation and auto save. Open them from the gear in the title bar.
+- **Updates**: Feather checks for new versions and offers to install them from a prompt in the corner. You can also check from Settings.
+- The repository switcher shows just the name, and the worktree and branch pickers share one row.
+
+This is the last version you need to download by hand: from here on Feather can update itself.
+
 ## 0.1.0
 
 The first release of Feather.

@@ -5,9 +5,11 @@ mod app;
 mod diff;
 mod document;
 mod git;
+mod settings;
 mod theme;
 mod tree;
 mod ui;
+mod update;
 mod worker;
 
 use eframe::egui;
@@ -27,7 +29,7 @@ fn main() -> eframe::Result {
     }
 
     let options = eframe::NativeOptions {
-        viewport,
+        viewport: ui::titlebar::configure(viewport),
         renderer: eframe::Renderer::Glow,
         persist_window: true,
         ..Default::default()

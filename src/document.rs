@@ -1,7 +1,6 @@
 //! Loading files for the viewer and syntax-highlighting them. All of this runs
 //! off the UI thread.
 
-use eframe::egui::Color32;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -12,12 +11,12 @@ use syntect::highlighting::{
 };
 use syntect::parsing::{SyntaxReference, SyntaxSet};
 
-use crate::diff::expand_tabs;
-
 /// Files larger than this are not loaded into the viewer.
 const MAX_TEXT_BYTES: u64 = 5 * 1024 * 1024;
 /// Highlighting is skipped above this size; plain text is still shown.
 const MAX_HIGHLIGHT_BYTES: u64 = 1024 * 1024;
+/// Larger files open read-only: a text field holding megabytes gets sluggish.
+const MAX_EDIT_BYTES: u64 = 1024 * 1024;
 /// Lines longer than this are truncated on screen (minified bundles etc).
 const MAX_LINE_CHARS: usize = 4000;
 
@@ -50,22 +49,30 @@ fn extension(path: &str) -> String {
         .unwrap_or_default()
 }
 
-/// One colored run within a line: bytes up to `end` use `color`.
-#[derive(Clone, Copy, Debug)]
+/// One run within a line: bytes up to `end` belong to a syntax token class
+/// (see [`crate::theme::syntax`]). The theme turns the class into a color.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Span {
     pub end: u32,
-    pub color: Color32,
+    pub class: u8,
 }
 
 pub type Highlights = Vec<Vec<Span>>;
 
 pub struct TextDoc {
-    /// The file exactly as read, for the markdown preview.
+    /// The file's text with line endings normalised to `\n`.
     pub raw: String,
-    /// Display lines: tabs expanded, over-long lines truncated.
+    /// One entry per line. Over-long lines are cut short in files that are
+    /// not [`editable`](Self::editable).
     pub lines: Vec<String>,
+    /// Widest line in columns, for sizing the horizontal scroll area.
     pub max_chars: usize,
     pub highlights: Option<Highlights>,
+    /// The file used Windows line endings, to be restored on save.
+    pub crlf: bool,
+    /// False for files that are too big to edit comfortably, or that are not
+    /// valid UTF-8 (saving those would damage them).
+    pub editable: bool,
 }
 
 pub enum Body {
@@ -128,17 +135,25 @@ fn looks_binary(bytes: &[u8]) -> bool {
 }
 
 fn text_doc(bytes: Vec<u8>) -> TextDoc {
-    let raw = match String::from_utf8(bytes) {
-        Ok(s) => s,
-        Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
+    let size = bytes.len() as u64;
+    let (mut raw, lossy) = match String::from_utf8(bytes) {
+        Ok(s) => (s, false),
+        Err(e) => (String::from_utf8_lossy(e.as_bytes()).into_owned(), true),
     };
+    let crlf = raw.contains("\r\n");
+    if crlf {
+        raw = raw.replace("\r\n", "\n");
+    }
+    let too_long = raw.lines().any(|line| line.len() > MAX_LINE_CHARS * 4);
+    let editable = !lossy && size <= MAX_EDIT_BYTES && !too_long;
+
     let mut max_chars = 0;
     let lines: Vec<String> = raw
         .lines()
         .map(|line| {
-            let mut line = expand_tabs(line);
-            let mut chars = line.chars().count();
-            if chars > MAX_LINE_CHARS {
+            let mut line = line.to_owned();
+            let mut chars = columns(&line);
+            if !editable && chars > MAX_LINE_CHARS {
                 let cut = line
                     .char_indices()
                     .nth(MAX_LINE_CHARS)
@@ -156,7 +171,14 @@ fn text_doc(bytes: Vec<u8>) -> TextDoc {
         lines,
         max_chars,
         highlights: None,
+        crlf,
+        editable,
     }
+}
+
+/// Width of a line in columns, counting a tab as four.
+pub fn columns(line: &str) -> usize {
+    line.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum()
 }
 
 // ── Syntax highlighting ────────────────────────────────────────────────────
@@ -237,11 +259,11 @@ pub fn highlight(
         let mut end = 0u32;
         for (style, piece) in ranges {
             end += piece.len() as u32;
-            let c = style.foreground;
-            let color = Color32::from_rgb(c.r, c.g, c.b);
+            // The theme below stores the token class in the red channel.
+            let class = style.foreground.r;
             match spans.last_mut() {
-                Some(last) if last.color == color => last.end = end,
-                _ => spans.push(Span { end, color }),
+                Some(last) if last.class == class => last.end = end,
+                _ => spans.push(Span { end, class }),
             }
         }
         // Drop the newline we added.
@@ -253,75 +275,62 @@ pub fn highlight(
     Some(out)
 }
 
+/// A syntect theme whose "colors" are token classes: the red channel carries
+/// the class number, which [`highlight`] reads back out.
 fn build_theme() -> Theme {
-    const FG: u32 = 0xd6d8dc;
-    const COMMENT: u32 = 0x6b6f77;
-    const PUNCT: u32 = 0x9a9da5;
-    const VIOLET: u32 = 0xa79df2;
-    const GREEN: u32 = 0x8cc8a0;
-    const ORANGE: u32 = 0xe0a36a;
-    const BLUE: u32 = 0x7db3f5;
-    const YELLOW: u32 = 0xe2c07c;
-    const RED: u32 = 0xe8868b;
-    const TEAL: u32 = 0x76cfc4;
+    use crate::theme::syntax as class;
 
-    let rules: &[(&str, u32)] = &[
-        ("comment, punctuation.definition.comment", COMMENT),
-        ("punctuation, meta.brace, keyword.operator", PUNCT),
-        ("keyword, storage, keyword.operator.word", VIOLET),
-        ("string, punctuation.definition.string, markup.raw", GREEN),
+    let rules: &[(&str, u8)] = &[
+        ("comment, punctuation.definition.comment", class::COMMENT),
         (
-            "constant.numeric, constant.language, constant.other, support.constant, \
-             variable.other.constant, string.regexp",
-            ORANGE,
+            "punctuation, meta.brace, keyword.operator",
+            class::PUNCTUATION,
+        ),
+        ("keyword, storage, keyword.operator.word", class::KEYWORD),
+        (
+            "string, punctuation.definition.string, markup.raw, markup.inserted, markup.quote",
+            class::STRING,
         ),
         (
-            "constant.character.escape, constant.other.placeholder",
-            TEAL,
+            "constant.numeric, constant.language, constant.other, support.constant, \
+             variable.other.constant, string.regexp, entity.other.attribute-name, \
+             variable.language, variable.parameter.option",
+            class::NUMBER,
+        ),
+        (
+            "constant.character.escape, constant.other.placeholder, markup.bold, markup.italic, \
+             markup.underline.link, variable.annotation, meta.annotation, entity.name.label",
+            class::ESCAPE,
         ),
         (
             "entity.name.function, support.function, variable.function, meta.function-call, \
-             markup.heading, entity.name.section",
-            BLUE,
+             markup.heading, entity.name.section, meta.mapping.key string, \
+             meta.mapping.key punctuation.definition.string, support.type.property-name, \
+             meta.property-name, entity.name.tag.yaml, entity.name.tag.toml, meta.tag.key",
+            class::FUNCTION,
         ),
         (
             "entity.name.type, entity.name.class, entity.name.struct, entity.name.enum, \
              entity.name.trait, entity.name.namespace, support.type, support.class, \
              entity.other.inherited-class",
-            YELLOW,
+            class::TYPE,
         ),
-        ("entity.name.tag, markup.deleted, invalid", RED),
-        (
-            "entity.other.attribute-name, variable.language, variable.parameter.option",
-            ORANGE,
-        ),
-        (
-            "meta.mapping.key string, meta.mapping.key punctuation.definition.string, \
-             support.type.property-name, meta.property-name, entity.name.tag.yaml, \
-             entity.name.tag.toml, meta.tag.key",
-            BLUE,
-        ),
-        ("markup.inserted, markup.quote", GREEN),
-        ("markup.bold, markup.italic, markup.underline.link", TEAL),
-        (
-            "variable.annotation, meta.annotation, entity.name.label",
-            TEAL,
-        ),
+        ("entity.name.tag, markup.deleted, invalid", class::TAG),
     ];
 
-    let color = |hex: u32| Color {
-        r: (hex >> 16) as u8,
-        g: (hex >> 8) as u8,
-        b: hex as u8,
+    let marker = |class: u8| Color {
+        r: class,
+        g: 0,
+        b: 0,
         a: 0xff,
     };
     let scopes = rules
         .iter()
-        .filter_map(|(selector, hex)| {
+        .filter_map(|(selector, class)| {
             Some(ThemeItem {
                 scope: selector.parse::<ScopeSelectors>().ok()?,
                 style: StyleModifier {
-                    foreground: Some(color(*hex)),
+                    foreground: Some(marker(*class)),
                     background: None,
                     font_style: None,
                 },
@@ -333,11 +342,23 @@ fn build_theme() -> Theme {
         name: Some("Feather".to_owned()),
         author: None,
         settings: ThemeSettings {
-            foreground: Some(color(FG)),
+            foreground: Some(marker(class::TEXT)),
             ..ThemeSettings::default()
         },
         scopes,
     }
+}
+
+/// Highlights a whole text; `None` if the language is unknown, the text is too
+/// big, or `generation` moved past `token` first.
+pub fn highlight_text(
+    text: &str,
+    rel: &str,
+    generation: &AtomicU64,
+    token: u64,
+) -> Option<Highlights> {
+    let lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
+    highlight(&lines, rel, text.len() as u64, generation, token)
 }
 
 pub fn format_size(bytes: u64) -> String {
@@ -422,8 +443,11 @@ mod tests {
         assert_eq!(preview_kind("docs/README.MD"), Preview::Markdown);
         assert_eq!(preview_kind("logo.svg"), Preview::Svg);
         assert!(is_image("a/b.PNG"));
-        let doc = text_doc(b"a\tb\nsecond".to_vec());
-        assert_eq!(doc.lines, ["a   b", "second"]);
+        let doc = text_doc(b"a\tb\r\nsecond".to_vec());
+        assert_eq!(doc.lines, ["a\tb", "second"]);
+        assert_eq!(doc.raw, "a\tb\nsecond");
         assert_eq!(doc.max_chars, 6);
+        assert!(doc.crlf && doc.editable);
+        assert!(!text_doc(vec![b'a', 0xff, b'b']).editable);
     }
 }

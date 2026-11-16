@@ -12,18 +12,20 @@ use super::widgets::{
     ButtonKind, button, elided, empty_state, icon_button, menu_item, paint_galley, paint_icon,
     paint_row_bg, popup_frame,
 };
-use crate::app::{Cmd, Repo, Settings, Tab, View};
+use crate::app::{Cmd, Repo, Tab, View};
 use crate::git::{Change, ChangeKind};
-use crate::theme::{self, HEADER_HEIGHT, ROW_HEIGHT, icon};
+use crate::settings::Settings;
+use crate::theme::{self, ROW_HEIGHT, icon};
 use crate::worker::Action;
 
 const PAD: f32 = 8.0;
 const TABS_HEIGHT: f32 = 36.0;
 const FOOTER_ROW: f32 = 28.0;
+const SWITCHER_HEIGHT: f32 = 40.0;
 
 pub fn show(ui: &mut Ui, repo: &mut Repo, settings: &Settings, cmds: &mut Vec<Cmd>) {
     Panel::top("sidebar_header")
-        .exact_size(HEADER_HEIGHT + TABS_HEIGHT)
+        .exact_size(SWITCHER_HEIGHT + TABS_HEIGHT)
         .frame(Frame::new())
         .show_separator_line(false)
         .show(ui, |ui| {
@@ -33,7 +35,7 @@ pub fn show(ui: &mut Ui, repo: &mut Repo, settings: &Settings, cmds: &mut Vec<Cm
 
     if repo.is_git {
         Panel::bottom("sidebar_footer")
-            .exact_size(FOOTER_ROW * 2.0 + PAD * 2.0)
+            .exact_size(FOOTER_ROW + PAD * 2.0)
             .frame(Frame::new())
             .show_separator_line(false)
             .show(ui, |ui| footer(ui, repo, cmds));
@@ -59,43 +61,11 @@ pub fn show(ui: &mut Ui, repo: &mut Repo, settings: &Settings, cmds: &mut Vec<Cm
 
 // ── Header ─────────────────────────────────────────────────────────────────
 
-fn avatar_color(name: &str) -> Color32 {
-    const COLORS: [Color32; 6] = [
-        theme::ACCENT,
-        Color32::from_rgb(0x26, 0xa5, 0x8c),
-        Color32::from_rgb(0xd9, 0x7a, 0x3a),
-        Color32::from_rgb(0xc2, 0x4f, 0x8e),
-        Color32::from_rgb(0x3b, 0x8f, 0xd9),
-        Color32::from_rgb(0x8a, 0x63, 0xd2),
-    ];
-    let hash = name
-        .bytes()
-        .fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
-    COLORS[hash as usize % COLORS.len()]
-}
-
-fn paint_avatar(ui: &Ui, rect: Rect, name: &str) {
-    ui.painter()
-        .rect_filled(rect, CornerRadius::same(5), avatar_color(name));
-    let letter: String = name
-        .chars()
-        .find(|c| c.is_alphanumeric())
-        .map(|c| c.to_uppercase().collect())
-        .unwrap_or_else(|| "?".to_owned());
-    ui.painter().text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        letter,
-        egui::FontId::new(11.0, theme::semibold()),
-        Color32::WHITE,
-    );
-}
-
 fn repo_switcher(ui: &mut Ui, repo: &Repo, settings: &Settings, cmds: &mut Vec<Cmd>) {
     let (outer, _) =
-        ui.allocate_exact_size(vec2(ui.available_width(), HEADER_HEIGHT), Sense::hover());
+        ui.allocate_exact_size(vec2(ui.available_width(), SWITCHER_HEIGHT), Sense::hover());
     let rect = Rect::from_min_max(
-        pos2(outer.left() + PAD, outer.top() + 8.0),
+        pos2(outer.left() + PAD, outer.top() + 2.0),
         pos2(outer.right() - PAD, outer.bottom() - 6.0),
     );
     let response = ui
@@ -105,23 +75,21 @@ fn repo_switcher(ui: &mut Ui, repo: &Repo, settings: &Settings, cmds: &mut Vec<C
     paint_row_bg(ui, rect, response.hovered() || open, false);
 
     let mid = rect.center().y;
-    let avatar = Rect::from_center_size(pos2(rect.left() + 17.0, mid), vec2(18.0, 18.0));
-    paint_avatar(ui, avatar, &repo.name);
+    let x = rect.left() + 10.0;
     let name = elided(
         ui,
         &repo.name,
-        theme::medium_font(13.0),
-        theme::TEXT,
-        rect.width() - 62.0,
+        theme::medium_font(13.5),
+        theme::text(),
+        rect.width() - 44.0,
     );
-    let x = avatar.right() + 9.0;
     let w = paint_galley(ui, x, mid, name);
     paint_icon(
         ui,
         pos2(x + w + 12.0, mid),
         icon::CARET_UP_DOWN,
         12.0,
-        theme::TEXT_MUTED,
+        theme::text_muted(),
     );
 
     Popup::menu(&response)
@@ -176,7 +144,7 @@ fn section_label(ui: &mut Ui, text: &str) {
         Align2::LEFT_CENTER,
         text,
         theme::medium_font(11.5),
-        theme::TEXT_MUTED,
+        theme::text_muted(),
     );
 }
 
@@ -188,7 +156,7 @@ fn tabs(ui: &mut Ui, repo: &mut Repo) {
         pos2(outer.right() - PAD, outer.bottom() - 6.0),
     );
     ui.painter()
-        .rect_filled(track, CornerRadius::same(7), Color32::from_white_alpha(8));
+        .rect_filled(track, CornerRadius::same(7), theme::overlay(8));
 
     let count = repo.status.change_count();
     let half = (track.width() - 4.0) / 2.0;
@@ -213,14 +181,14 @@ fn tabs(ui: &mut Ui, repo: &mut Repo) {
         let active = repo.tab == tab;
         if active {
             ui.painter()
-                .rect_filled(seg, CornerRadius::same(5), Color32::from_white_alpha(24));
+                .rect_filled(seg, CornerRadius::same(5), theme::overlay(24));
         }
         let color = if !enabled {
-            theme::TEXT_FAINT
+            theme::text_faint()
         } else if active || response.hovered() {
-            theme::TEXT
+            theme::text()
         } else {
-            theme::TEXT_SECONDARY
+            theme::text_secondary()
         };
         let galley = ui
             .painter()
@@ -229,7 +197,7 @@ fn tabs(ui: &mut Ui, repo: &mut Repo) {
             ui.painter().layout_no_wrap(
                 count.to_string(),
                 theme::medium_font(11.0),
-                theme::TEXT_SECONDARY,
+                theme::text_secondary(),
             )
         });
         let badge_w = badge.as_ref().map_or(0.0, |b| b.size().x + 10.0 + 6.0);
@@ -241,7 +209,7 @@ fn tabs(ui: &mut Ui, repo: &mut Repo) {
                 vec2(badge.size().x + 10.0, 16.0),
             );
             ui.painter()
-                .rect_filled(pill, CornerRadius::same(8), Color32::from_white_alpha(22));
+                .rect_filled(pill, CornerRadius::same(8), theme::overlay(22));
             paint_galley(ui, pill.left() + 5.0, pill.center().y, badge);
         }
         if response.clicked() {
@@ -257,11 +225,11 @@ fn tabs(ui: &mut Ui, repo: &mut Repo) {
 
 fn kind_color(kind: ChangeKind) -> Color32 {
     match kind {
-        ChangeKind::Modified => theme::YELLOW,
-        ChangeKind::Added | ChangeKind::Untracked => theme::GREEN,
-        ChangeKind::Deleted => theme::RED,
-        ChangeKind::Renamed => theme::BLUE,
-        ChangeKind::Conflicted => theme::ORANGE,
+        ChangeKind::Modified => theme::yellow(),
+        ChangeKind::Added | ChangeKind::Untracked => theme::green(),
+        ChangeKind::Deleted => theme::red(),
+        ChangeKind::Renamed => theme::blue(),
+        ChangeKind::Conflicted => theme::orange(),
     }
 }
 
@@ -313,7 +281,7 @@ fn files(ui: &mut Ui, repo: &mut Repo, cmds: &mut Vec<Cmd>) {
                 } else {
                     icon::CARET_RIGHT
                 };
-                paint_icon(ui, pos2(x + 5.0, mid), caret, 10.0, theme::TEXT_MUTED);
+                paint_icon(ui, pos2(x + 5.0, mid), caret, 10.0, theme::text_muted());
             }
             x += 14.0;
             let glyph = match (node.is_dir, node.expanded) {
@@ -322,9 +290,9 @@ fn files(ui: &mut Ui, repo: &mut Repo, cmds: &mut Vec<Cmd>) {
                 (false, _) => file_icon(&node.name),
             };
             let icon_color = if ignored {
-                theme::TEXT_FAINT
+                theme::text_faint()
             } else {
-                theme::TEXT_MUTED
+                theme::text_muted()
             };
             paint_icon(ui, pos2(x + 8.0, mid), glyph, 15.0, icon_color);
             x += 22.0;
@@ -349,17 +317,17 @@ fn files(ui: &mut Ui, repo: &mut Repo, cmds: &mut Vec<Cmd>) {
                 ui.painter().circle_filled(
                     pos2(right - 5.0, mid),
                     2.5,
-                    theme::YELLOW.gamma_multiply(0.7),
+                    theme::yellow().gamma_multiply(0.7),
                 );
                 right -= 18.0;
             }
 
             let color = if ignored {
-                theme::TEXT_MUTED
+                theme::text_muted()
             } else if is_selected {
-                theme::TEXT
+                theme::text()
             } else {
-                Color32::from_rgb(0xc9, 0xcb, 0xd0)
+                theme::text().gamma_multiply(0.88)
             };
             let name = elided(ui, &node.name, theme::ui_font(13.0), color, right - x);
             paint_galley(ui, x, mid, name);
@@ -436,7 +404,7 @@ fn changes(ui: &mut Ui, repo: &Repo, cmds: &mut Vec<Cmd>) {
                     let galley = ui.painter().layout_no_wrap(
                         label.to_owned(),
                         theme::medium_font(11.5),
-                        theme::TEXT_MUTED,
+                        theme::text_muted(),
                     );
                     let w = paint_galley(ui, rect.left() + 8.0, mid, galley);
                     ui.painter().text(
@@ -444,7 +412,7 @@ fn changes(ui: &mut Ui, repo: &Repo, cmds: &mut Vec<Cmd>) {
                         Align2::LEFT_CENTER,
                         count.to_string(),
                         theme::ui_font(11.5),
-                        theme::TEXT_FAINT,
+                        theme::text_faint(),
                     );
                     let slot =
                         Rect::from_center_size(pos2(rect.right() - 14.0, mid), vec2(22.0, 22.0));
@@ -530,9 +498,9 @@ fn change_row(
     };
     let x = rect.left() + 8.0;
     let name_color = if change.kind == ChangeKind::Deleted {
-        theme::TEXT_SECONDARY
+        theme::text_secondary()
     } else {
-        theme::TEXT
+        theme::text()
     };
     let name = elided(ui, name, theme::ui_font(13.0), name_color, right - x);
     let w = paint_galley(ui, x, mid, name);
@@ -542,7 +510,7 @@ fn change_row(
             ui,
             dir,
             theme::ui_font(12.0),
-            theme::TEXT_MUTED,
+            theme::text_muted(),
             right - dir_x,
         );
         paint_galley(ui, dir_x, mid + 0.5, dir);
@@ -570,13 +538,13 @@ fn commit_box(ui: &mut Ui, repo: &mut Repo, cmds: &mut Vec<Cmd>) {
     let edit_id = ui.scope_id().with("commit_message");
     let focused = ui.memory(|m| m.has_focus(edit_id));
     Frame::new()
-        .fill(theme::BG_INPUT)
+        .fill(theme::bg_input())
         .stroke(Stroke::new(
             1.0,
             if focused {
-                theme::ACCENT.gamma_multiply(0.8)
+                theme::accent().gamma_multiply(0.8)
             } else {
-                theme::BORDER_STRONG
+                theme::border_strong()
             },
         ))
         .corner_radius(CornerRadius::same(theme::RADIUS))
@@ -679,9 +647,9 @@ fn ghost_button(ui: &mut Ui, glyph: &str, label: &str, width: f32) -> Response {
     let color = if response.hovered() {
         ui.painter()
             .rect_filled(rect, CornerRadius::same(theme::RADIUS), theme::hover_bg());
-        theme::TEXT
+        theme::text()
     } else {
-        theme::TEXT_SECONDARY
+        theme::text_secondary()
     };
     let galley = ui
         .painter()
@@ -700,16 +668,19 @@ fn footer(ui: &mut Ui, repo: &mut Repo, cmds: &mut Vec<Cmd>) {
     ui.painter().hline(
         outer.x_range(),
         outer.top(),
-        Stroke::new(1.0, theme::BORDER),
+        Stroke::new(1.0, theme::border()),
     );
-    let row = |n: f32| {
+    // One row, two columns: worktree on the left, branch on the right.
+    let gap = 4.0;
+    let width = (outer.width() - PAD * 2.0 - gap) / 2.0;
+    let column = |n: f32| {
         Rect::from_min_size(
-            pos2(outer.left() + PAD, outer.top() + PAD + FOOTER_ROW * n),
-            vec2(outer.width() - PAD * 2.0, FOOTER_ROW),
+            pos2(outer.left() + PAD + (width + gap) * n, outer.top() + PAD),
+            vec2(width, FOOTER_ROW),
         )
     };
-    worktree_picker(ui, row(0.0), repo, cmds);
-    branch_picker(ui, row(1.0), repo, cmds);
+    worktree_picker(ui, column(0.0), repo, cmds);
+    branch_picker(ui, column(1.0), repo, cmds);
 }
 
 /// Paints a footer row and returns its click response.
@@ -727,7 +698,7 @@ fn footer_row(ui: &Ui, rect: Rect, id: &str, glyph: &str, label: &str, detail: &
         pos2(rect.left() + 15.0, mid),
         glyph,
         14.0,
-        theme::TEXT_MUTED,
+        theme::text_muted(),
     );
     let mut right = rect.right() - 8.0;
     if active {
@@ -736,22 +707,24 @@ fn footer_row(ui: &Ui, rect: Rect, id: &str, glyph: &str, label: &str, detail: &
             pos2(right - 6.0, mid),
             icon::CARET_UP_DOWN,
             12.0,
-            theme::TEXT_MUTED,
+            theme::text_muted(),
         );
         right -= 18.0;
     } else if !detail.is_empty() {
-        let galley =
-            ui.painter()
-                .layout_no_wrap(detail.to_owned(), theme::ui_font(11.5), theme::TEXT_MUTED);
+        let galley = ui.painter().layout_no_wrap(
+            detail.to_owned(),
+            theme::ui_font(11.5),
+            theme::text_muted(),
+        );
         right -= galley.size().x;
         paint_galley(ui, right, mid, galley);
         right -= 8.0;
     }
     let x = rect.left() + 30.0;
     let color = if active {
-        theme::TEXT
+        theme::text()
     } else {
-        theme::TEXT_SECONDARY
+        theme::text_secondary()
     };
     let galley = elided(ui, label, theme::ui_font(12.5), color, right - x);
     paint_galley(ui, x, mid, galley);
@@ -761,7 +734,7 @@ fn footer_row(ui: &Ui, rect: Rect, id: &str, glyph: &str, label: &str, detail: &
 fn worktree_picker(ui: &mut Ui, rect: Rect, repo: &Repo, cmds: &mut Vec<Cmd>) {
     let detail = match repo.worktrees.len() {
         0 | 1 => String::new(),
-        n => format!("{n} worktrees"),
+        n => n.to_string(),
     };
     let response = footer_row(
         ui,
@@ -847,7 +820,7 @@ fn branch_picker(ui: &mut Ui, rect: Rect, repo: &mut Repo, cmds: &mut Vec<Cmd>) 
             ui.painter().hline(
                 line.x_range(),
                 line.top(),
-                Stroke::new(1.0, theme::BORDER_STRONG),
+                Stroke::new(1.0, theme::border_strong()),
             );
             ui.add_space(4.0);
 

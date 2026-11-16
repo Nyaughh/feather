@@ -24,7 +24,7 @@ pub fn elided(ui: &Ui, text: &str, font: FontId, color: Color32, max_width: f32)
 pub fn paint_galley(ui: &Ui, x: f32, y: f32, galley: Arc<Galley>) -> f32 {
     let size = galley.size();
     let pos = pos2(x, y - size.y / 2.0).round();
-    ui.painter().galley(pos, galley, theme::TEXT);
+    ui.painter().galley(pos, galley, theme::text());
     size.x
 }
 
@@ -58,10 +58,10 @@ pub fn icon_button(ui: &Ui, rect: Rect, id: Id, icon: &str, tooltip: &str) -> Re
         .on_hover_cursor(CursorIcon::PointingHand);
     let color = if response.hovered() {
         ui.painter()
-            .rect_filled(rect, CornerRadius::same(5), Color32::from_white_alpha(22));
-        theme::TEXT
+            .rect_filled(rect, CornerRadius::same(5), theme::overlay(22));
+        theme::text()
     } else {
-        theme::TEXT_SECONDARY
+        theme::text_secondary()
     };
     paint_icon(ui, rect.center(), icon, 14.0, color);
     response.on_hover_text(tooltip)
@@ -102,40 +102,36 @@ pub fn button(
     }
     let hovered = enabled && response.hovered();
     let (fill, stroke, text) = match kind {
-        ButtonKind::Primary if !enabled => (
-            Color32::from_white_alpha(10),
-            Stroke::NONE,
-            theme::TEXT_MUTED,
-        ),
+        ButtonKind::Primary if !enabled => (theme::overlay(10), Stroke::NONE, theme::text_muted()),
         ButtonKind::Primary => (
             if hovered {
-                theme::ACCENT_HOVER
+                theme::accent_hover()
             } else {
-                theme::ACCENT
+                theme::accent()
             },
             Stroke::NONE,
             Color32::WHITE,
         ),
         ButtonKind::Danger => (
             if hovered {
-                Color32::from_rgb(0xf0, 0x6a, 0x6a)
+                theme::red().gamma_multiply(0.88)
             } else {
-                theme::RED
+                theme::red()
             },
             Stroke::NONE,
             Color32::WHITE,
         ),
         ButtonKind::Secondary => (
             if hovered {
-                Color32::from_white_alpha(20)
+                theme::overlay(20)
             } else {
-                Color32::from_white_alpha(10)
+                theme::overlay(10)
             },
-            Stroke::new(1.0, theme::BORDER_STRONG),
+            Stroke::new(1.0, theme::border_strong()),
             if enabled {
-                theme::TEXT
+                theme::text()
             } else {
-                theme::TEXT_MUTED
+                theme::text_muted()
             },
         ),
     };
@@ -168,7 +164,7 @@ pub fn menu_item(
     let mid = rect.center().y;
     let mut x = rect.left() + 8.0;
     if let Some(icon) = icon {
-        paint_icon(ui, pos2(x + 8.0, mid), icon, 14.0, theme::TEXT_SECONDARY);
+        paint_icon(ui, pos2(x + 8.0, mid), icon, 14.0, theme::text_secondary());
         x += 24.0;
     }
     let mut right = rect.right() - 8.0;
@@ -178,18 +174,18 @@ pub fn menu_item(
             pos2(right - 7.0, mid),
             theme::icon::CHECK,
             13.0,
-            theme::TEXT,
+            theme::text(),
         );
         right -= 22.0;
     }
-    let label = elided(ui, label, theme::ui_font(13.0), theme::TEXT, right - x);
+    let label = elided(ui, label, theme::ui_font(13.0), theme::text(), right - x);
     x += paint_galley(ui, x, mid, label) + 8.0;
     if let Some(detail) = detail {
         let detail = elided(
             ui,
             detail,
             theme::ui_font(12.0),
-            theme::TEXT_MUTED,
+            theme::text_muted(),
             right - x,
         );
         // Right-align the detail text.
@@ -213,7 +209,7 @@ pub fn segmented(ui: &mut Ui, id: Id, labels: &[&str], selected: usize) -> Optio
     let size = Vec2::new(seg_w * labels.len() as f32 + 4.0, 26.0);
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     ui.painter()
-        .rect_filled(rect, CornerRadius::same(7), Color32::from_white_alpha(10));
+        .rect_filled(rect, CornerRadius::same(7), theme::overlay(10));
 
     let mut chosen = None;
     for (i, galley) in galleys.into_iter().enumerate() {
@@ -227,12 +223,12 @@ pub fn segmented(ui: &mut Ui, id: Id, labels: &[&str], selected: usize) -> Optio
         let active = i == selected;
         if active {
             ui.painter()
-                .rect_filled(seg, CornerRadius::same(5), Color32::from_white_alpha(26));
+                .rect_filled(seg, CornerRadius::same(5), theme::overlay(26));
         }
         let color = if active || response.hovered() {
-            theme::TEXT
+            theme::text()
         } else {
-            theme::TEXT_SECONDARY
+            theme::text_secondary()
         };
         let pos = seg.center() - galley.size() / 2.0;
         ui.painter()
@@ -253,38 +249,34 @@ pub fn empty_state(ui: &mut Ui, icon: &str, title: &str, detail: Option<&str>) {
         pos2(center.x, center.y - 26.0),
         icon,
         28.0,
-        theme::TEXT_FAINT,
+        theme::text_faint(),
     );
     ui.painter().text(
         pos2(center.x, center.y + 6.0),
         Align2::CENTER_CENTER,
         title,
         theme::medium_font(13.0),
-        theme::TEXT_SECONDARY,
+        theme::text_secondary(),
     );
     if let Some(detail) = detail {
         let galley = ui.painter().layout(
             detail.to_owned(),
             theme::ui_font(12.5),
-            theme::TEXT_MUTED,
+            theme::text_muted(),
             (rect.width() - 48.0).clamp(80.0, 460.0),
         );
         let pos = pos2(center.x - galley.size().x / 2.0, center.y + 22.0);
-        ui.painter().galley(pos.round(), galley, theme::TEXT_MUTED);
+        ui.painter()
+            .galley(pos.round(), galley, theme::text_muted());
     }
 }
 
 /// Styling shared by popups and menus.
 pub fn popup_frame() -> egui::Frame {
     egui::Frame::new()
-        .fill(theme::BG_ELEVATED)
-        .stroke(Stroke::new(1.0, theme::BORDER_STRONG))
+        .fill(theme::bg_elevated())
+        .stroke(Stroke::new(1.0, theme::border_strong()))
         .corner_radius(CornerRadius::same(8))
         .inner_margin(egui::Margin::same(4))
-        .shadow(egui::Shadow {
-            offset: [0, 6],
-            blur: 20,
-            spread: 0,
-            color: Color32::from_black_alpha(110),
-        })
+        .shadow(theme::popup_shadow())
 }
