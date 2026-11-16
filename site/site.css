@@ -137,6 +137,7 @@ main > section + section { margin-top: 128px; }
 .tour a { display: block; }
 .tour h2 { font-size: clamp(1.4rem, 2.6vw, 1.75rem); line-height: 1.2; letter-spacing: -.025em; }
 .tour p { margin-top: 12px; }
+.tour kbd { margin-right: 2px; }
 
 /* ── Install ─────────────────────────────────────────────────────────────── */
 

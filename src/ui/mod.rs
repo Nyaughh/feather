@@ -1,8 +1,10 @@
 //! Everything drawn on screen. `root` lays out the window; the submodules fill
-//! in the sidebar and the content area.
+//! in the title bar, the sidebar and the content area.
 
 mod content;
+mod settings;
 mod sidebar;
+pub mod titlebar;
 mod widgets;
 
 use eframe::egui::{
@@ -10,58 +12,76 @@ use eframe::egui::{
     Modal, Order, Panel, Rect, ScrollArea, Sense, Stroke, Ui, pos2, vec2,
 };
 
-use crate::app::{App, Cmd, Repo, Settings, Toast};
+use crate::app::{App, Cmd, Repo, Toast, ToastKind};
 use crate::git::ChangeKind;
+use crate::settings::Settings;
 use crate::theme::{self, icon};
+use crate::update::{self, Updater};
 use crate::worker::Action;
 use widgets::{ButtonKind, button, elided, paint_galley, paint_icon, paint_row_bg, popup_frame};
 
 pub fn root(app: &mut App, ui: &mut Ui, cmds: &mut Vec<Cmd>) {
-    let App {
-        repo,
-        settings,
-        markdown,
-        toast,
-        ..
-    } = app;
+    let ctx = ui.ctx().clone();
+    titlebar::show(
+        ui,
+        app.repo.as_ref(),
+        app.settings.sidebar_open,
+        &app.updater,
+        cmds,
+    );
 
-    match repo {
-        None => welcome(ui, settings, cmds),
+    match &mut app.repo {
+        None => welcome(ui, &app.settings, cmds),
         Some(repo) => {
-            Panel::left("sidebar")
-                .resizable(true)
-                .default_size(264.0)
-                .size_range(208.0..=440.0)
-                .frame(Frame::new().fill(theme::BG_SHELL))
-                .show_separator_line(false)
-                .show(ui, |ui| sidebar::show(ui, repo, settings, cmds));
+            let sidebar_open = app.settings.sidebar_open;
+            if sidebar_open {
+                Panel::left("sidebar")
+                    .resizable(true)
+                    .default_size(264.0)
+                    .size_range(208.0..=440.0)
+                    .frame(Frame::new().fill(theme::bg_shell()))
+                    .show_separator_line(false)
+                    .show(ui, |ui| sidebar::show(ui, repo, &app.settings, cmds));
+            }
 
             // The content sits in a bordered, rounded panel inset from the shell.
             CentralPanel::default()
-                .frame(Frame::new().fill(theme::BG_SHELL).inner_margin(Margin {
-                    left: 0,
+                .frame(Frame::new().fill(theme::bg_shell()).inner_margin(Margin {
+                    left: if sidebar_open { 0 } else { 8 },
                     right: 8,
-                    top: 8,
+                    top: 0,
                     bottom: 8,
                 }))
                 .show(ui, |ui| {
                     Frame::new()
-                        .fill(theme::BG_PANEL)
-                        .stroke(Stroke::new(1.0, theme::BORDER))
+                        .fill(theme::bg_panel())
+                        .stroke(Stroke::new(1.0, theme::border()))
                         .corner_radius(CornerRadius::same(8))
                         .show(ui, |ui| {
                             ui.set_min_size(ui.available_size());
                             // Keep content from painting over the rounded corners.
                             ui.shrink_clip_rect(ui.max_rect().shrink(1.0));
-                            content::show(ui, repo, markdown, cmds);
+                            content::show(ui, repo, &app.settings, &mut app.markdown, cmds);
                         });
                 });
 
-            discard_modal(ui.ctx(), repo, cmds);
+            discard_modal(&ctx, repo, cmds);
         }
     }
 
-    toast_ui(ui.ctx(), toast);
+    if app.settings_open {
+        settings::show(
+            &ctx,
+            &mut app.settings,
+            &mut app.settings_open,
+            &app.updater,
+            cmds,
+        );
+    }
+    leave_modal(&ctx, app, cmds);
+    update_prompt(&ctx, &mut app.updater, cmds);
+    toast_ui(&ctx, &mut app.toast);
+    titlebar::frame(&ctx);
 }
 
 /// A scroll area that only lays out the rows currently on screen.
@@ -106,7 +126,7 @@ pub(crate) fn virtual_rows(
 
 fn welcome(ui: &mut Ui, settings: &Settings, cmds: &mut Vec<Cmd>) {
     CentralPanel::default()
-        .frame(Frame::new().fill(theme::BG_SHELL))
+        .frame(Frame::new().fill(theme::bg_shell()))
         .show(ui, |ui| {
             let width = 360.0_f32.min(ui.available_width() - 48.0);
             let recent: Vec<_> = settings.recent.iter().take(6).collect();
@@ -120,19 +140,19 @@ fn welcome(ui: &mut Ui, settings: &Settings, cmds: &mut Vec<Cmd>) {
 
                 let (mark, _) = ui.allocate_exact_size(vec2(44.0, 44.0), Sense::hover());
                 ui.painter()
-                    .rect_filled(mark, CornerRadius::same(11), theme::ACCENT);
+                    .rect_filled(mark, CornerRadius::same(11), theme::accent());
                 paint_icon(ui, mark.center(), icon::FEATHER, 24.0, Color32::WHITE);
 
                 ui.add_space(18.0);
                 ui.label(
                     egui::RichText::new("Feather")
                         .font(egui::FontId::new(20.0, theme::semibold()))
-                        .color(theme::TEXT),
+                        .color(theme::text()),
                 );
                 ui.add_space(6.0);
                 ui.label(
-                    egui::RichText::new("Open a repository to browse files and review changes.")
-                        .color(theme::TEXT_SECONDARY),
+                    egui::RichText::new("Open a repository to browse, edit and commit.")
+                        .color(theme::text_secondary()),
                 );
                 ui.add_space(22.0);
                 if button(ui, ButtonKind::Primary, "Open repository", None, true).clicked() {
@@ -146,7 +166,7 @@ fn welcome(ui: &mut Ui, settings: &Settings, cmds: &mut Vec<Cmd>) {
                 ui.label(
                     egui::RichText::new(shortcut)
                         .size(11.5)
-                        .color(theme::TEXT_MUTED),
+                        .color(theme::text_muted()),
                 );
 
                 if !recent.is_empty() {
@@ -157,7 +177,7 @@ fn welcome(ui: &mut Ui, settings: &Settings, cmds: &mut Vec<Cmd>) {
                         Align2::LEFT_CENTER,
                         "Recent",
                         theme::medium_font(11.5),
-                        theme::TEXT_MUTED,
+                        theme::text_muted(),
                     );
                     for path in recent {
                         let (rect, response) =
@@ -173,7 +193,7 @@ fn welcome(ui: &mut Ui, settings: &Settings, cmds: &mut Vec<Cmd>) {
                             ui,
                             &name,
                             theme::medium_font(13.0),
-                            theme::TEXT,
+                            theme::text(),
                             width * 0.5,
                         );
                         let x = rect.left() + 10.0;
@@ -186,7 +206,7 @@ fn welcome(ui: &mut Ui, settings: &Settings, cmds: &mut Vec<Cmd>) {
                             ui,
                             &parent,
                             theme::ui_font(12.0),
-                            theme::TEXT_MUTED,
+                            theme::text_muted(),
                             rect.right() - 10.0 - (x + w + 10.0),
                         );
                         paint_galley(ui, x + w + 10.0, mid, parent);
@@ -199,31 +219,52 @@ fn welcome(ui: &mut Ui, settings: &Settings, cmds: &mut Vec<Cmd>) {
         });
 }
 
-// ── Overlays ───────────────────────────────────────────────────────────────
+// ── Dialogs ────────────────────────────────────────────────────────────────
+
+fn dialog_title(ui: &mut Ui, text: &str) {
+    ui.label(
+        egui::RichText::new(text)
+            .font(egui::FontId::new(15.0, theme::semibold()))
+            .color(theme::text()),
+    );
+    ui.add_space(8.0);
+}
+
+fn dialog_body(ui: &mut Ui, text: String) {
+    ui.label(egui::RichText::new(text).color(theme::text_secondary()));
+    ui.add_space(20.0);
+}
+
+fn dialog(ctx: &egui::Context, name: &str, add: impl FnOnce(&mut Ui)) -> bool {
+    Modal::new(Id::unique(name))
+        .frame(popup_frame().inner_margin(Margin::same(20)))
+        .backdrop_color(Color32::from_black_alpha(140))
+        .show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            add(ui);
+        })
+        .should_close()
+}
 
 fn discard_modal(ctx: &egui::Context, repo: &mut Repo, cmds: &mut Vec<Cmd>) {
     let Some(change) = repo.confirm_discard.clone() else {
         return;
     };
     let mut close = false;
-    let modal = Modal::new(Id::unique("discard_modal"))
-        .frame(popup_frame().inner_margin(Margin::same(20)))
-        .backdrop_color(Color32::from_black_alpha(140))
-        .show(ctx, |ui| {
-            ui.set_width(360.0);
-            ui.spacing_mut().item_spacing.y = 0.0;
-            let untracked = change.kind == ChangeKind::Untracked;
-            ui.label(
-                egui::RichText::new(if untracked {
-                    "Delete untracked file?"
-                } else {
-                    "Discard changes?"
-                })
-                .font(egui::FontId::new(15.0, theme::semibold()))
-                .color(theme::TEXT),
-            );
-            ui.add_space(8.0);
-            let body = if untracked {
+    let dismissed = dialog(ctx, "discard_modal", |ui| {
+        let untracked = change.kind == ChangeKind::Untracked;
+        dialog_title(
+            ui,
+            if untracked {
+                "Delete untracked file?"
+            } else {
+                "Discard changes?"
+            },
+        );
+        dialog_body(
+            ui,
+            if untracked {
                 format!(
                     "{} isn't tracked by git, so discarding it deletes the file. This can't be undone.",
                     change.path
@@ -233,22 +274,146 @@ fn discard_modal(ctx: &egui::Context, repo: &mut Repo, cmds: &mut Vec<Cmd>) {
                     "Your unstaged edits to {} will be lost. This can't be undone.",
                     change.path
                 )
-            };
-            ui.label(egui::RichText::new(body).color(theme::TEXT_SECONDARY));
-            ui.add_space(20.0);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let label = if untracked { "Delete file" } else { "Discard" };
-                if button(ui, ButtonKind::Danger, label, None, true).clicked() {
-                    cmds.push(Cmd::Act(Action::Discard(change.clone())));
-                    close = true;
+            },
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let label = if untracked { "Delete file" } else { "Discard" };
+            if button(ui, ButtonKind::Danger, label, None, true).clicked() {
+                cmds.push(Cmd::Act(Action::Discard(change.clone())));
+                close = true;
+            }
+            if button(ui, ButtonKind::Secondary, "Cancel", None, true).clicked() {
+                close = true;
+            }
+        });
+    });
+    if close || dismissed {
+        repo.confirm_discard = None;
+    }
+}
+
+/// "Save your changes first?", shown before anything that would drop them.
+fn leave_modal(ctx: &egui::Context, app: &App, cmds: &mut Vec<Cmd>) {
+    if app.confirm_leave.is_none() {
+        return;
+    }
+    let file = match app.repo.as_ref().map(|r| &r.view) {
+        Some(crate::app::View::File(view)) => view.rel.clone(),
+        _ => "this file".to_owned(),
+    };
+    let dismissed = dialog(ctx, "leave_modal", |ui| {
+        dialog_title(ui, "Save your changes?");
+        dialog_body(
+            ui,
+            format!(
+                "{file} has edits that haven't been saved. They will be lost if you don't save them."
+            ),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if button(ui, ButtonKind::Primary, "Save", None, true).clicked() {
+                cmds.push(Cmd::LeaveSaving);
+            }
+            if button(ui, ButtonKind::Secondary, "Don't save", None, true).clicked() {
+                cmds.push(Cmd::LeaveDiscarding);
+            }
+            if button(ui, ButtonKind::Secondary, "Cancel", None, true).clicked() {
+                cmds.push(Cmd::LeaveCancelled);
+            }
+        });
+    });
+    if dismissed {
+        cmds.push(Cmd::LeaveCancelled);
+    }
+}
+
+// ── Floating cards ─────────────────────────────────────────────────────────
+
+/// The update card in the bottom-right corner.
+fn update_prompt(ctx: &egui::Context, updater: &mut Updater, cmds: &mut Vec<Cmd>) {
+    use update::State;
+    if updater.dismissed {
+        return;
+    }
+    let (title, detail): (String, String) = match &updater.state {
+        State::Available(release) => (
+            format!("Feather {} is available", release.version),
+            format!("You have {}.", update::CURRENT_VERSION),
+        ),
+        State::Installing(release) => (
+            format!("Updating to Feather {}…", release.version),
+            "Downloading and checking the new version.".to_owned(),
+        ),
+        State::Ready(release) => (
+            format!("Feather {} is installed", release.version),
+            "Restart to start using it.".to_owned(),
+        ),
+        State::InstallFailed(_, error) => ("The update didn't install".to_owned(), error.clone()),
+        _ => return,
+    };
+
+    let mut dismiss = false;
+    Area::new(Id::unique("update_prompt"))
+        .order(Order::Foreground)
+        .anchor(Align2::RIGHT_BOTTOM, vec2(-20.0, -20.0))
+        .show(ctx, |ui| {
+            popup_frame().inner_margin(Margin::same(16)).show(ui, |ui| {
+                ui.set_width(300.0);
+                ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
+                ui.label(
+                    egui::RichText::new(title)
+                        .font(theme::medium_font(13.5))
+                        .color(theme::text()),
+                );
+                ui.add_space(4.0);
+                ui.add(
+                    egui::Label::new(egui::RichText::new(detail).color(theme::text_secondary()))
+                        .wrap(),
+                );
+                if matches!(updater.state, State::Installing(_)) {
+                    ui.add_space(12.0);
+                    ui.add(egui::Spinner::new().size(16.0).color(theme::text_muted()));
+                    return;
                 }
-                if button(ui, ButtonKind::Secondary, "Cancel", None, true).clicked() {
-                    close = true;
-                }
+                ui.add_space(14.0);
+                ui.horizontal(|ui| match &updater.state {
+                    State::Available(release) => {
+                        if release.installable() {
+                            if button(ui, ButtonKind::Primary, "Update", None, true).clicked() {
+                                cmds.push(Cmd::InstallUpdate);
+                            }
+                        } else if button(ui, ButtonKind::Primary, "Download", None, true).clicked()
+                        {
+                            cmds.push(Cmd::OpenUrl(release.page.clone()));
+                        }
+                        if button(ui, ButtonKind::Secondary, "Later", None, true).clicked() {
+                            dismiss = true;
+                        }
+                    }
+                    State::Ready(_) => {
+                        if button(ui, ButtonKind::Primary, "Restart now", None, true).clicked() {
+                            cmds.push(Cmd::RestartToUpdate);
+                        }
+                        if button(ui, ButtonKind::Secondary, "Later", None, true).clicked() {
+                            dismiss = true;
+                        }
+                    }
+                    State::InstallFailed(release, _) => {
+                        if button(ui, ButtonKind::Primary, "Try again", None, true).clicked() {
+                            cmds.push(Cmd::InstallUpdate);
+                        }
+                        if button(ui, ButtonKind::Secondary, "Download", None, true).clicked() {
+                            cmds.push(Cmd::OpenUrl(release.page.clone()));
+                        }
+                        if button(ui, ButtonKind::Secondary, "Close", None, true).clicked() {
+                            dismiss = true;
+                        }
+                    }
+                    _ => {}
+                });
             });
         });
-    if close || modal.should_close() {
-        repo.confirm_discard = None;
+    if dismiss {
+        updater.dismissed = true;
     }
 }
 
@@ -257,20 +422,24 @@ fn toast_ui(ctx: &egui::Context, toast: &mut Option<Toast>) {
     let mut dismiss = false;
     Area::new(Id::unique("toast"))
         .order(Order::Tooltip)
-        .anchor(Align2::RIGHT_BOTTOM, vec2(-20.0, -20.0))
+        .anchor(Align2::CENTER_BOTTOM, vec2(0.0, -24.0))
         .show(ctx, |ui| {
             let response = popup_frame()
                 .inner_margin(Margin::symmetric(14, 12))
                 .show(ui, |ui| {
-                    ui.set_max_width(380.0);
+                    ui.set_max_width(420.0);
                     ui.horizontal_top(|ui| {
                         ui.spacing_mut().item_spacing.x = 10.0;
                         let (slot, _) = ui.allocate_exact_size(vec2(16.0, 18.0), Sense::hover());
-                        paint_icon(ui, slot.center(), icon::WARNING, 16.0, theme::RED);
+                        let (glyph, color) = match current.kind {
+                            ToastKind::Error => (icon::WARNING, theme::red()),
+                            ToastKind::Info => (icon::INFO, theme::text_secondary()),
+                        };
+                        paint_icon(ui, slot.center(), glyph, 16.0, color);
                         // Git errors can run long; show the start of them.
                         let text: String = current.text.chars().take(600).collect();
                         ui.add(
-                            egui::Label::new(egui::RichText::new(text).color(theme::TEXT)).wrap(),
+                            egui::Label::new(egui::RichText::new(text).color(theme::text())).wrap(),
                         );
                     });
                 })
