@@ -7,7 +7,8 @@ const REPO = 'Nyaughh/feather';
 /** The three downloads. File names are the same in every release. */
 const PLATFORMS = {
   mac: { name: 'macOS', asset: 'feather-macos-universal.zip', card: 'os-mac' },
-  windows: { name: 'Windows', asset: 'feather-windows-x86_64.exe', card: 'os-windows' },
+  // Releases before 0.2.1 have no installer, only the program on its own.
+  windows: { name: 'Windows', asset: 'feather-windows-x86_64-setup.exe', older: 'feather-windows-x86_64.exe', card: 'os-windows' },
   linux: { name: 'Linux', asset: 'feather-linux-x86_64.tar.gz', card: 'os-linux' },
 };
 
@@ -133,8 +134,9 @@ function showReleases([latest, ...older]) {
     el('span', { className: 'name' }, release.name),
     el('span', { className: 'meta' }, `${release.tag} · ${day(release.date)}`),
     ...Object.values(PLATFORMS)
-      .filter(({ asset }) => release.assets[asset])
-      .map(({ name, asset }) => el('a', { href: release.assets[asset].url }, name)),
+      .map(({ name, asset, older }) => ({ name, file: release.assets[asset] ?? release.assets[older] }))
+      .filter(({ file }) => file)
+      .map(({ name, file }) => el('a', { href: file.url }, name)),
     el('a', { href: release.page }, 'Notes'),
   )));
 }

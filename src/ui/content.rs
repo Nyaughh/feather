@@ -286,7 +286,7 @@ fn file_body(
             ui,
             icon::FILE,
             "Binary file",
-            Some(&format!("{size} — no preview available.")),
+            Some(&format!("{size} - no preview available.")),
         ),
         Body::TooLarge => empty_state(
             ui,

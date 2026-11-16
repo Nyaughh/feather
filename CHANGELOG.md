@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1
+
+- **Windows installer**: `feather-windows-x86_64-setup.exe` installs Feather for your user account with no administrator prompt, adds Start menu and desktop shortcuts and an uninstaller, and can add "Open with Feather" to the right-click menu for folders.
+- **README badges**: badge images (shields.io and similar) now show up, with their text, instead of red warning icons.
+- The plain `.exe` is still there for anyone who prefers to keep it in a folder of their own; both update themselves the same way.
+
+Windows still shows its "protected your PC" box the first time, for the installer as for the plain program, because Feather is not code-signed yet. Choose **More info**, then **Run anyway**.
+
 ## 0.2.0
 
 - **Edit files**: click into any text file and type. Save with Ctrl+S (Cmd+S on macOS), or turn on auto save. Feather asks before dropping unsaved changes.

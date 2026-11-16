@@ -600,6 +600,9 @@ impl App {
         theme::install_fonts(&cc.egui_ctx);
         theme::apply(&cc.egui_ctx, &settings);
         egui_extras::install_image_loaders(&cc.egui_ctx);
+        // Added last, so it gets first refusal on anything that is an SVG.
+        cc.egui_ctx
+            .add_image_loader(std::sync::Arc::new(crate::svg::SvgLoader::new()));
         ui::titlebar::prepare_window(cc);
 
         let mut app = Self {
@@ -630,7 +633,7 @@ impl App {
         self.settings.recent.insert(0, repo.root.clone());
         self.settings.recent.truncate(MAX_RECENT);
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
-            "{} — Feather",
+            "{} - Feather",
             repo.name
         )));
         self.repo = Some(repo);
