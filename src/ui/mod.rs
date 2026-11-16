@@ -2,8 +2,10 @@
 //! in the title bar, the sidebar and the content area.
 
 mod content;
+mod search;
 mod settings;
 mod sidebar;
+mod terminal;
 pub mod titlebar;
 mod widgets;
 
@@ -44,6 +46,34 @@ pub fn root(app: &mut App, ui: &mut Ui, cmds: &mut Vec<Cmd>) {
                     .show(ui, |ui| sidebar::show(ui, repo, &app.settings, cmds));
             }
 
+            // The terminal shares the right-hand column, under the content.
+            if repo.terminals.open {
+                Panel::bottom("terminal_panel")
+                    .resizable(true)
+                    .default_size(260.0)
+                    .size_range(110.0..=640.0)
+                    .frame(Frame::new().fill(theme::bg_shell()).inner_margin(Margin {
+                        left: if sidebar_open { 0 } else { 8 },
+                        right: 8,
+                        top: 0,
+                        bottom: 8,
+                    }))
+                    .show_separator_line(false)
+                    .show(ui, |ui| {
+                        Frame::new()
+                            .fill(theme::bg_panel())
+                            .stroke(Stroke::new(1.0, theme::border()))
+                            .corner_radius(CornerRadius::same(theme::panel_radius()))
+                            .show(ui, |ui| {
+                                ui.set_min_size(ui.available_size());
+                                ui.shrink_clip_rect(ui.max_rect().shrink(1.0));
+                                terminal::show(ui, repo, cmds);
+                            });
+                    });
+            } else {
+                repo.terminals.focused = false;
+            }
+
             // The content sits in a bordered, rounded panel inset from the shell.
             CentralPanel::default()
                 .frame(Frame::new().fill(theme::bg_shell()).inner_margin(Margin {
@@ -56,7 +86,7 @@ pub fn root(app: &mut App, ui: &mut Ui, cmds: &mut Vec<Cmd>) {
                     Frame::new()
                         .fill(theme::bg_panel())
                         .stroke(Stroke::new(1.0, theme::border()))
-                        .corner_radius(CornerRadius::same(8))
+                        .corner_radius(CornerRadius::same(theme::panel_radius()))
                         .show(ui, |ui| {
                             ui.set_min_size(ui.available_size());
                             // Keep content from painting over the rounded corners.
@@ -66,6 +96,8 @@ pub fn root(app: &mut App, ui: &mut Ui, cmds: &mut Vec<Cmd>) {
                 });
 
             discard_modal(&ctx, repo, cmds);
+            discard_all_modal(&ctx, repo, cmds);
+            search::quick_open(&ctx, repo, cmds);
         }
     }
 
@@ -78,6 +110,7 @@ pub fn root(app: &mut App, ui: &mut Ui, cmds: &mut Vec<Cmd>) {
             cmds,
         );
     }
+    theme_import_modal(&ctx, app);
     leave_modal(&ctx, app, cmds);
     update_prompt(&ctx, &mut app.updater, cmds);
     toast_ui(&ctx, &mut app.toast);
@@ -98,28 +131,57 @@ pub(crate) fn virtual_rows(
     count: usize,
     content_width: f32,
     pad: f32,
+    add_row: impl FnMut(&mut Ui, usize, Rect),
+) {
+    virtual_rows_from(
+        ui,
+        id,
+        horizontal,
+        row_height,
+        count,
+        content_width,
+        pad,
+        None,
+        add_row,
+    );
+}
+
+/// [`virtual_rows`], optionally scrolled to a vertical offset first.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn virtual_rows_from(
+    ui: &mut Ui,
+    id: Id,
+    horizontal: bool,
+    row_height: f32,
+    count: usize,
+    content_width: f32,
+    pad: f32,
+    scroll_to: Option<f32>,
     mut add_row: impl FnMut(&mut Ui, usize, Rect),
 ) {
-    ScrollArea::new([horizontal, true])
+    let mut area = ScrollArea::new([horizontal, true])
         .id_salt(id)
-        .auto_shrink(false)
-        .show_viewport(ui, |ui, viewport| {
-            let width = if horizontal {
-                content_width.max(ui.available_width())
-            } else {
-                ui.available_width()
-            };
-            let height = pad * 2.0 + row_height * count as f32;
-            let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+        .auto_shrink(false);
+    if let Some(offset) = scroll_to {
+        area = area.vertical_scroll_offset(offset);
+    }
+    area.show_viewport(ui, |ui, viewport| {
+        let width = if horizontal {
+            content_width.max(ui.available_width())
+        } else {
+            ui.available_width()
+        };
+        let height = pad * 2.0 + row_height * count as f32;
+        let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
 
-            let first = ((viewport.min.y - pad) / row_height).floor().max(0.0) as usize;
-            let last = (((viewport.max.y - pad) / row_height).ceil().max(0.0) as usize).min(count);
-            for i in first..last {
-                let top = rect.top() + pad + row_height * i as f32;
-                let row = Rect::from_min_size(pos2(rect.left(), top), vec2(width, row_height));
-                add_row(ui, i, row);
-            }
-        });
+        let first = ((viewport.min.y - pad) / row_height).floor().max(0.0) as usize;
+        let last = (((viewport.max.y - pad) / row_height).ceil().max(0.0) as usize).min(count);
+        for i in first..last {
+            let top = rect.top() + pad + row_height * i as f32;
+            let row = Rect::from_min_size(pos2(rect.left(), top), vec2(width, row_height));
+            add_row(ui, i, row);
+        }
+    });
 }
 
 // ── Welcome screen ─────────────────────────────────────────────────────────
@@ -141,7 +203,7 @@ fn welcome(ui: &mut Ui, settings: &Settings, cmds: &mut Vec<Cmd>) {
                 let (mark, _) = ui.allocate_exact_size(vec2(44.0, 44.0), Sense::hover());
                 ui.painter()
                     .rect_filled(mark, CornerRadius::same(11), theme::accent());
-                paint_icon(ui, mark.center(), icon::FEATHER, 24.0, Color32::WHITE);
+                paint_icon(ui, mark.center(), icon::FEATHER, 24.0, theme::on_accent());
 
                 ui.add_space(18.0);
                 ui.label(
@@ -292,6 +354,52 @@ fn discard_modal(ctx: &egui::Context, repo: &mut Repo, cmds: &mut Vec<Cmd>) {
     }
 }
 
+fn discard_all_modal(ctx: &egui::Context, repo: &mut Repo, cmds: &mut Vec<Cmd>) {
+    if !repo.confirm_discard_all {
+        return;
+    }
+    let changes = &repo.status.unstaged;
+    let untracked = changes
+        .iter()
+        .filter(|c| c.kind == ChangeKind::Untracked)
+        .count();
+    let edited = changes.len() - untracked;
+    let files = |n: usize| if n == 1 { "file" } else { "files" };
+    let mut parts = Vec::new();
+    if edited > 0 {
+        parts.push(format!("Edits to {edited} {} will be lost", files(edited)));
+    }
+    if untracked > 0 {
+        parts.push(format!(
+            "{untracked} untracked {} will be deleted",
+            files(untracked)
+        ));
+    }
+    let mut close = false;
+    let dismissed = dialog(ctx, "discard_all_modal", |ui| {
+        dialog_title(ui, "Discard all changes?");
+        dialog_body(
+            ui,
+            format!(
+                "{}. Staged changes are kept. This can't be undone.",
+                parts.join(", and ")
+            ),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if button(ui, ButtonKind::Danger, "Discard all", None, true).clicked() {
+                cmds.push(Cmd::Act(Action::DiscardAll));
+                close = true;
+            }
+            if button(ui, ButtonKind::Secondary, "Cancel", None, true).clicked() {
+                close = true;
+            }
+        });
+    });
+    if close || dismissed || changes.is_empty() {
+        repo.confirm_discard_all = false;
+    }
+}
+
 /// "Save your changes first?", shown before anything that would drop them.
 fn leave_modal(ctx: &egui::Context, app: &App, cmds: &mut Vec<Cmd>) {
     if app.confirm_leave.is_none() {
@@ -323,6 +431,104 @@ fn leave_modal(ctx: &egui::Context, app: &App, cmds: &mut Vec<Cmd>) {
     });
     if dismissed {
         cmds.push(Cmd::LeaveCancelled);
+    }
+}
+
+/// Paste-in dialog for a theme from tweakcn (or any shadcn/ui theme).
+fn theme_import_modal(ctx: &egui::Context, app: &mut App) {
+    let Some(draft) = &mut app.theme_import else {
+        return;
+    };
+    let mut import = false;
+    let mut cancel = false;
+    let dismissed = Modal::new(Id::unique("theme_import"))
+        .frame(popup_frame().inner_margin(Margin::same(20)))
+        .backdrop_color(Color32::from_black_alpha(140))
+        .show(ctx, |ui| {
+            ui.set_width(460.0_f32.min(ctx.content_rect().width() - 80.0));
+            ui.spacing_mut().item_spacing.y = 0.0;
+            dialog_title(ui, "Import a theme");
+            ui.label(
+                egui::RichText::new(
+                    "On tweakcn.com, pick or build a theme, press Code and copy the CSS. Paste it \
+                     below. Any shadcn/ui theme works the same way.",
+                )
+                .color(theme::text_secondary()),
+            );
+            ui.add_space(14.0);
+            let field = |ui: &mut Ui, add: &mut dyn FnMut(&mut Ui)| {
+                Frame::new()
+                    .fill(theme::bg_input())
+                    .stroke(Stroke::new(1.0, theme::border_strong()))
+                    .corner_radius(CornerRadius::same(theme::radius()))
+                    .inner_margin(Margin::symmetric(8, 6))
+                    .show(ui, |ui| add(ui));
+            };
+            field(ui, &mut |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.name)
+                        .hint_text("Name, for example Sunset")
+                        .desired_width(f32::INFINITY)
+                        .frame(Frame::new()),
+                );
+            });
+            ui.add_space(8.0);
+            field(ui, &mut |ui| {
+                ScrollArea::vertical()
+                    .id_salt("theme_css")
+                    .max_height(220.0)
+                    .min_scrolled_height(220.0)
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut draft.css)
+                                .hint_text(":root {\n  --background: oklch(1 0 0);\n  ...\n}")
+                                .font(egui::TextStyle::Monospace)
+                                .desired_rows(10)
+                                .desired_width(f32::INFINITY)
+                                .frame(Frame::new()),
+                        );
+                    });
+            });
+            if let Some(error) = &draft.error {
+                ui.add_space(10.0);
+                ui.add(egui::Label::new(egui::RichText::new(error).color(theme::red())).wrap());
+            }
+            ui.add_space(18.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let ready = !draft.css.trim().is_empty();
+                if button(ui, ButtonKind::Primary, "Import", None, ready).clicked() {
+                    import = true;
+                }
+                if button(ui, ButtonKind::Secondary, "Cancel", None, true).clicked() {
+                    cancel = true;
+                }
+            });
+        })
+        .should_close();
+
+    if import {
+        match crate::themes::import_css(&draft.css) {
+            Ok(_) => {
+                let name = match draft.name.trim() {
+                    "" => format!("Imported {}", app.settings.custom_themes.len() + 1),
+                    name => name.to_owned(),
+                };
+                let imported = crate::settings::CustomTheme {
+                    name,
+                    css: draft.css.clone(),
+                };
+                // Importing under an existing name replaces that theme.
+                app.settings
+                    .custom_themes
+                    .retain(|t| t.name != imported.name);
+                app.settings.theme_name = imported.id();
+                app.settings.custom_themes.push(imported);
+                app.theme_import = None;
+            }
+            Err(error) => draft.error = Some(error),
+        }
+    } else if cancel || dismissed {
+        app.theme_import = None;
     }
 }
 

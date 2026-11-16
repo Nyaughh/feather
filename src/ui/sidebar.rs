@@ -47,6 +47,11 @@ pub fn show(ui: &mut Ui, repo: &mut Repo, settings: &Settings, cmds: &mut Vec<Cm
                 .frame(Frame::new())
                 .show(ui, |ui| files(ui, repo, cmds));
         }
+        Tab::Search => {
+            CentralPanel::default()
+                .frame(Frame::new())
+                .show(ui, |ui| super::search::show(ui, repo, cmds));
+        }
         Tab::Git => {
             Panel::bottom("commit_box")
                 .frame(Frame::new().inner_margin(Margin::same(PAD as i8)))
@@ -159,16 +164,18 @@ fn tabs(ui: &mut Ui, repo: &mut Repo) {
         .rect_filled(track, CornerRadius::same(7), theme::overlay(8));
 
     let count = repo.status.change_count();
-    let half = (track.width() - 4.0) / 2.0;
-    for (i, (tab, label)) in [(Tab::Files, "Files"), (Tab::Git, "Git")]
-        .into_iter()
-        .enumerate()
-    {
+    let all = [
+        (Tab::Files, "Files"),
+        (Tab::Search, "Search"),
+        (Tab::Git, "Git"),
+    ];
+    let half = (track.width() - 4.0) / all.len() as f32;
+    for (i, (tab, label)) in all.into_iter().enumerate() {
         let seg = Rect::from_min_size(
             pos2(track.left() + 2.0 + half * i as f32, track.top() + 2.0),
             vec2(half, track.height() - 4.0),
         );
-        let enabled = tab == Tab::Files || repo.is_git;
+        let enabled = tab != Tab::Git || repo.is_git;
         let response = ui.interact(
             seg,
             ui.scope_id().with(("tab", i)),
@@ -233,7 +240,7 @@ fn kind_color(kind: ChangeKind) -> Color32 {
     }
 }
 
-fn file_icon(name: &str) -> &'static str {
+pub(super) fn file_icon(name: &str) -> &'static str {
     let ext = name.rsplit_once('.').map_or("", |(_, e)| e);
     match ext.to_ascii_lowercase().as_str() {
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "svg" => icon::FILE_IMAGE,
@@ -421,8 +428,23 @@ fn changes(ui: &mut Ui, repo: &Repo, cmds: &mut Vec<Cmd>) {
                         if icon_button(ui, slot, id, icon::MINUS, "Unstage all").clicked() && idle {
                             cmds.push(Cmd::Act(Action::UnstageAll));
                         }
-                    } else if icon_button(ui, slot, id, icon::PLUS, "Stage all").clicked() && idle {
-                        cmds.push(Cmd::Act(Action::StageAll));
+                    } else {
+                        if icon_button(ui, slot, id, icon::PLUS, "Stage all").clicked() && idle {
+                            cmds.push(Cmd::Act(Action::StageAll));
+                        }
+                        let discard = slot.translate(vec2(-24.0, 0.0));
+                        if icon_button(
+                            ui,
+                            discard,
+                            id.with("discard"),
+                            icon::DISCARD,
+                            "Discard all changes",
+                        )
+                        .clicked()
+                            && idle
+                        {
+                            cmds.push(Cmd::AskDiscardAll);
+                        }
                     }
                 }
                 GitRow::Change { staged, index } => {
@@ -547,7 +569,7 @@ fn commit_box(ui: &mut Ui, repo: &mut Repo, cmds: &mut Vec<Cmd>) {
                 theme::border_strong()
             },
         ))
-        .corner_radius(CornerRadius::same(theme::RADIUS))
+        .corner_radius(CornerRadius::same(theme::radius()))
         .inner_margin(Margin::symmetric(8, 6))
         .show(ui, |ui| {
             ScrollArea::vertical()
@@ -646,7 +668,7 @@ fn ghost_button(ui: &mut Ui, glyph: &str, label: &str, width: f32) -> Response {
     let response = response.on_hover_cursor(CursorIcon::PointingHand);
     let color = if response.hovered() {
         ui.painter()
-            .rect_filled(rect, CornerRadius::same(theme::RADIUS), theme::hover_bg());
+            .rect_filled(rect, CornerRadius::same(theme::radius()), theme::hover_bg());
         theme::text()
     } else {
         theme::text_secondary()

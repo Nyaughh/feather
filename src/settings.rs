@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ThemeChoice {
     /// Follow the operating system's light/dark setting.
     #[default]
@@ -12,9 +12,11 @@ pub enum ThemeChoice {
     Light,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Accent {
+    /// Whatever accent the chosen theme comes with.
     #[default]
+    Theme,
     Indigo,
     Blue,
     Green,
@@ -23,7 +25,8 @@ pub enum Accent {
 }
 
 impl Accent {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
+        Self::Theme,
         Self::Indigo,
         Self::Blue,
         Self::Green,
@@ -33,12 +36,27 @@ impl Accent {
 
     pub fn name(self) -> &'static str {
         match self {
+            Self::Theme => "The theme's own",
             Self::Indigo => "Indigo",
             Self::Blue => "Blue",
             Self::Green => "Green",
             Self::Orange => "Orange",
             Self::Pink => "Pink",
         }
+    }
+}
+
+/// A theme the user imported, kept as the CSS it came from.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CustomTheme {
+    pub name: String,
+    pub css: String,
+}
+
+impl CustomTheme {
+    /// How settings refer to this theme, distinct from any built-in one.
+    pub fn id(&self) -> String {
+        format!("custom:{}", self.name)
     }
 }
 
@@ -53,7 +71,11 @@ pub struct Settings {
     pub recent: Vec<PathBuf>,
     pub sidebar_open: bool,
 
+    /// Light, dark, or follow the system.
     pub theme: ThemeChoice,
+    /// Which theme: a built-in one's id, or a custom theme's.
+    pub theme_name: String,
+    pub custom_themes: Vec<CustomTheme>,
     pub accent: Accent,
     /// Scale of the whole interface.
     pub zoom: f32,
@@ -67,6 +89,9 @@ pub struct Settings {
     pub insert_spaces: bool,
     /// Save edits automatically a moment after typing stops.
     pub auto_save: bool,
+
+    /// The program new terminals run. Empty means the system's usual shell.
+    pub shell: String,
 
     /// Fetch from the remote every few minutes, so new branches and commits
     /// show up without asking.
@@ -82,7 +107,9 @@ impl Default for Settings {
             recent: Vec::new(),
             sidebar_open: true,
             theme: ThemeChoice::System,
-            accent: Accent::Indigo,
+            theme_name: "feather".to_owned(),
+            custom_themes: Vec::new(),
+            accent: Accent::Theme,
             zoom: 1.0,
             font_size: 12.5,
             line_wrap: false,
@@ -90,6 +117,7 @@ impl Default for Settings {
             tab_size: 4,
             insert_spaces: true,
             auto_save: false,
+            shell: String::new(),
             auto_fetch: true,
             auto_update: true,
         }

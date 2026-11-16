@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0
+
+- **Terminal**: open terminals inside the window with Ctrl+` (or the button in the title bar). They start in the repository folder, and you can keep several in tabs. The shell can be changed in Settings.
+- **Search**: a new Search tab finds text across the repository, with options for case, whole words and regular expressions; click a result to open the file on that line. Ctrl+F finds within the open file, and Ctrl+P opens a file by typing part of its name.
+- **Themes**: seven built-in themes (Feather, Midnight, Catppuccin, Gruvbox, Nord, Solarized, Tokyo Night), each with a light and a dark side, restyle the whole app. You can also import a theme by pasting the CSS from tweakcn.com or any shadcn/ui theme.
+- **Blame**: the status bar under a file shows who last changed the current line, when, and the commit summary, next to the cursor position.
+- **Discard all**: a button beside "Stage all" throws away every unstaged change, after asking.
+- The sidebar tabs are now Files, Search and Git (Ctrl+1, 2 and 3).
+
 ## 0.2.1
 
 - **Windows installer**: `feather-windows-x86_64-setup.exe` installs Feather for your user account with no administrator prompt, adds Start menu and desktop shortcuts and an uninstaller, and can add "Open with Feather" to the right-click menu for folders.

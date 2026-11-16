@@ -9,6 +9,7 @@ use super::widgets::{ButtonKind, button, icon_button, popup_frame, segmented};
 use crate::app::Cmd;
 use crate::settings::{Accent, FONT_SIZES, Settings, TAB_SIZES, ThemeChoice, ZOOM_LEVELS};
 use crate::theme::{self, icon};
+use crate::themes;
 use crate::update::{self, Updater};
 
 const WIDTH: f32 = 540.0;
@@ -75,10 +76,11 @@ pub fn show(
 
 fn body(ui: &mut Ui, settings: &mut Settings, updater: &Updater, cmds: &mut Vec<Cmd>) {
     section(ui, "Appearance");
+    theme_grid(ui, settings, cmds);
     row(
         ui,
-        "Theme",
-        "System follows your computer's light or dark mode.",
+        "Mode",
+        "Each theme has a light and a dark side. System follows your computer.",
         |ui| {
             let choices = [ThemeChoice::System, ThemeChoice::Dark, ThemeChoice::Light];
             let selected = choices
@@ -98,7 +100,7 @@ fn body(ui: &mut Ui, settings: &mut Settings, updater: &Updater, cmds: &mut Vec<
     row(
         ui,
         "Accent colour",
-        "Used for buttons and selections.",
+        "Used for buttons and selections. The first keeps the theme's own.",
         |ui| {
             accent_picker(ui, &mut settings.accent);
         },
@@ -167,6 +169,32 @@ fn body(ui: &mut Ui, settings: &mut Settings, updater: &Updater, cmds: &mut Vec<
         "Save edits a moment after you stop typing.",
         |ui| {
             toggle(ui, "auto_save", &mut settings.auto_save);
+        },
+    );
+
+    section(ui, "Terminal");
+    row(
+        ui,
+        "Shell",
+        "The program new terminals run. Leave empty for the usual one.",
+        |ui| {
+            egui::Frame::new()
+                .fill(theme::bg_input())
+                .stroke(Stroke::new(1.0, theme::border_strong()))
+                .corner_radius(CornerRadius::same(theme::radius()))
+                .inner_margin(Margin::symmetric(8, 4))
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut settings.shell)
+                            .hint_text(if cfg!(windows) {
+                                "powershell.exe"
+                            } else {
+                                "Your login shell"
+                            })
+                            .desired_width(150.0)
+                            .frame(egui::Frame::new()),
+                    );
+                });
         },
     );
 
@@ -318,7 +346,7 @@ fn stepper(
     let (rect, _) = ui.allocate_exact_size(vec2(112.0, 28.0), Sense::hover());
     ui.painter().rect(
         rect,
-        CornerRadius::same(theme::RADIUS),
+        CornerRadius::same(theme::radius()),
         theme::overlay(8),
         Stroke::new(1.0, theme::border_strong()),
         StrokeKind::Inside,
@@ -355,8 +383,19 @@ fn accent_picker(ui: &mut Ui, accent: &mut Accent) {
         let response = response
             .on_hover_cursor(CursorIcon::PointingHand)
             .on_hover_text(choice.name());
-        let color = theme::accent_swatch(choice);
-        ui.painter().circle_filled(rect.center(), 8.0, color);
+        match theme::accent_swatch(choice) {
+            Some(color) => {
+                ui.painter().circle_filled(rect.center(), 8.0, color);
+            }
+            // "The theme's own": an outlined dot rather than a fixed color.
+            None => {
+                ui.painter().circle_stroke(
+                    rect.center(),
+                    7.25,
+                    Stroke::new(1.5, theme::text_secondary()),
+                );
+            }
+        }
         if *accent == choice {
             ui.painter()
                 .circle_stroke(rect.center(), 10.5, Stroke::new(1.5, theme::text()));
@@ -368,4 +407,110 @@ fn accent_picker(ui: &mut Ui, accent: &mut Accent) {
             *accent = choice;
         }
     }
+}
+
+/// The themes, two to a row, each drawn in its own colors.
+fn theme_grid(ui: &mut Ui, settings: &mut Settings, cmds: &mut Vec<Cmd>) {
+    const HEIGHT: f32 = 44.0;
+    const GAP: f32 = 8.0;
+    let dark = theme::is_dark();
+
+    // (id, name, palette, is custom)
+    let mut cards: Vec<(String, String, theme::Palette, bool)> = themes::presets()
+        .into_iter()
+        .map(|p| {
+            let palette = if dark { p.dark } else { p.light };
+            (p.id.to_owned(), p.name.to_owned(), palette, false)
+        })
+        .collect();
+    for custom in &settings.custom_themes {
+        if let Some(palette) = themes::import_css(&custom.css)
+            .ok()
+            .and_then(|t| t.pick(dark))
+        {
+            cards.push((custom.id(), custom.name.clone(), palette, true));
+        }
+    }
+
+    ui.add_space(8.0);
+    let width = (ui.available_width() - GAP) / 2.0;
+    let mut remove = None;
+    for pair in cards.chunks(2) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = GAP;
+            for (id, name, palette, custom) in pair {
+                let (rect, response) = ui.allocate_exact_size(vec2(width, HEIGHT), Sense::click());
+                let response = response.on_hover_cursor(CursorIcon::PointingHand);
+                let selected = settings.theme_name == *id;
+                let outline = if selected {
+                    Stroke::new(2.0, theme::accent())
+                } else if response.hovered() {
+                    Stroke::new(1.0, theme::text_muted())
+                } else {
+                    Stroke::new(1.0, theme::border_strong())
+                };
+                let painter = ui.painter();
+                painter.rect(
+                    rect,
+                    CornerRadius::same(theme::panel_radius()),
+                    palette.bg_panel,
+                    outline,
+                    StrokeKind::Inside,
+                );
+                // A strip of the theme's sidebar color, as in the real window.
+                let strip = Rect::from_min_size(rect.min, vec2(10.0, rect.height())).shrink(2.0);
+                painter.rect_filled(strip, CornerRadius::same(3), palette.bg_shell);
+                painter.text(
+                    pos2(rect.left() + 20.0, rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    name,
+                    theme::medium_font(13.0),
+                    palette.text,
+                );
+                let mut x = rect.right() - if *custom { 40.0 } else { 16.0 };
+                for color in [palette.red, palette.green, palette.blue, palette.accent] {
+                    painter.circle_filled(pos2(x, rect.center().y), 5.0, color);
+                    x -= 14.0;
+                }
+                if response.clicked() {
+                    settings.theme_name.clone_from(id);
+                }
+                if *custom {
+                    let slot = Rect::from_center_size(
+                        pos2(rect.right() - 16.0, rect.center().y),
+                        vec2(22.0, 22.0),
+                    );
+                    let close = ui
+                        .interact(slot, Id::unique(("remove_theme", id)), Sense::click())
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text("Remove this theme");
+                    let color = if close.hovered() {
+                        palette.text
+                    } else {
+                        palette.text_muted
+                    };
+                    super::widgets::paint_icon(ui, slot.center(), icon::CLOSE, 12.0, color);
+                    if close.clicked() {
+                        remove = Some(id.clone());
+                    }
+                }
+            }
+        });
+        ui.add_space(GAP);
+    }
+    if let Some(id) = remove {
+        settings.custom_themes.retain(|t| t.id() != id);
+        if settings.theme_name == id {
+            settings.theme_name = "feather".to_owned();
+        }
+    }
+    ui.horizontal(|ui| {
+        if button(ui, ButtonKind::Secondary, "Import a theme", None, true)
+            .on_hover_text("Paste a theme from tweakcn.com or any shadcn/ui theme")
+            .clicked()
+        {
+            cmds.push(Cmd::ImportTheme);
+        }
+    });
+    ui.add_space(6.0);
 }

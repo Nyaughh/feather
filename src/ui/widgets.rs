@@ -6,7 +6,7 @@ use eframe::egui::{
 };
 use std::sync::Arc;
 
-use crate::theme::{self, RADIUS};
+use crate::theme;
 
 /// Lays out one line of text, ending in "…" if it does not fit `max_width`.
 pub fn elided(ui: &Ui, text: &str, font: FontId, color: Color32, max_width: f32) -> Arc<Galley> {
@@ -48,7 +48,7 @@ pub fn paint_row_bg(ui: &Ui, rect: Rect, hovered: bool, selected: bool) {
         return;
     };
     ui.painter()
-        .rect_filled(rect, CornerRadius::same(RADIUS), fill);
+        .rect_filled(rect, CornerRadius::same(theme::radius()), fill);
 }
 
 /// A square icon-only button painted into `rect`.
@@ -110,7 +110,7 @@ pub fn button(
                 theme::accent()
             },
             Stroke::NONE,
-            Color32::WHITE,
+            theme::on_accent(),
         ),
         ButtonKind::Danger => (
             if hovered {
@@ -138,7 +138,7 @@ pub fn button(
     let painter = ui.painter();
     painter.rect(
         rect,
-        CornerRadius::same(RADIUS),
+        CornerRadius::same(theme::radius()),
         fill,
         stroke,
         StrokeKind::Inside,

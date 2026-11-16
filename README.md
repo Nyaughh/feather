@@ -13,8 +13,12 @@ A fast, minimal desktop app for browsing a repository and handling everyday git.
 - **Branches and worktrees**: side by side at the bottom-left; click either to
   switch, or type a new name in the branch picker to create one. Branches that
   only exist on the remote are listed too, and Feather fetches every few minutes.
-- **Settings**: dark, light or system theme, accent colour, font size, line wrap
-  and indentation.
+- **Search**: text across the repository, find in the open file, and quick open
+  by file name.
+- **Terminal**: tabbed terminals in the repository folder, inside the window.
+- **Themes**: seven built in, each light and dark, and any tweakcn or shadcn/ui
+  theme can be pasted in. Plus accent colour, font size, line wrap and indentation.
+- **Blame**: who last changed the current line, in the status bar.
 - **Updates**: Feather checks for new releases and can install them itself.
 
 Feather is written in Rust with [egui](https://github.com/emilk/egui). It ships as a
@@ -44,28 +48,36 @@ The optimized binary is written to `target/release/feather`.
 
 `Ctrl` is `Cmd` on macOS.
 
-| Shortcut       | Action                     |
-|----------------|----------------------------|
-| `Ctrl+O`       | Open a repository          |
-| `Ctrl+S`       | Save the file being edited |
-| `Ctrl+1` / `2` | Files tab / Git tab        |
-| `Ctrl+Enter`   | Commit (in the Git tab)    |
-| `Ctrl+B`       | Hide or show the sidebar   |
-| `Ctrl+,`       | Settings                   |
-| `Ctrl+R`       | Refresh from disk          |
+| Shortcut         | Action                         |
+|------------------|--------------------------------|
+| `Ctrl+O`         | Open a repository              |
+| `Ctrl+P`         | Go to file                     |
+| `Ctrl+Shift+F`   | Search in files                |
+| `Ctrl+F`         | Find in the open file          |
+| `Ctrl+S`         | Save the file being edited     |
+| `` Ctrl+` ``     | Show or hide the terminal      |
+| `` Ctrl+Shift+` `` | New terminal                 |
+| `Ctrl+1` `2` `3` | Files, Search and Git tabs     |
+| `Ctrl+Enter`     | Commit (in the Git tab)        |
+| `Ctrl+B`         | Hide or show the sidebar       |
+| `Ctrl+,`         | Settings                       |
+| `Ctrl+R`         | Refresh from disk              |
 
 ## How it works
 
 | Module        | Role                                                                 |
 |---------------|----------------------------------------------------------------------|
-| `git.rs`      | Runs the `git` CLI and parses its output (status, diff, branches…).  |
+| `git.rs`      | Runs the `git` CLI: status, diff, branches, search (grep), blame.    |
 | `worker.rs`   | Background threads; results come back to the UI as events.           |
 | `document.rs` | Loads files and syntax-highlights them.                              |
 | `diff.rs`     | Parses unified diffs into rows.                                      |
 | `tree.rs`     | The lazily-read file tree.                                           |
 | `app.rs`      | Application state; applies UI commands and worker events.            |
 | `ui/`         | Drawing: title bar, sidebar, editor and diffs, settings, widgets.    |
-| `theme.rs`    | Colors, fonts and metrics, for the dark and light themes.            |
+| `theme.rs`    | The current colors, fonts and metrics.                               |
+| `themes.rs`   | The built-in themes, and importing one from tweakcn / shadcn CSS.    |
+| `terminal.rs` | Shells running in pseudo-terminals, and their screen state.          |
+| `svg.rs`      | SVG images, including README badges.                                 |
 | `settings.rs` | Everything the user can change, saved between runs.                  |
 | `update.rs`   | Checks GitHub for a newer release and installs it.                   |
 

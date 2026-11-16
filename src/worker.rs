@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use crate::diff::{self, Diff};
 use crate::document::{self, Body, FileStamp, Highlights, LoadedFile};
-use crate::git::{self, Branch, Change, Status, Worktree};
+use crate::git::{self, BlameLine, Branch, Change, SearchOptions, SearchResults, Status, Worktree};
 
 /// How often to look for outside changes while the window has focus.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -35,6 +35,8 @@ pub enum Action {
     StageAll,
     UnstageAll,
     Discard(Change),
+    /// Throw away every unstaged change.
+    DiscardAll,
     Commit(String),
     Switch(String),
     /// Check out a branch that only exists on a remote (`origin/name`).
@@ -57,7 +59,7 @@ impl Action {
         match self {
             Self::Stage(_) | Self::StageAll => "Staging…",
             Self::Unstage(_) | Self::UnstageAll => "Unstaging…",
-            Self::Discard(_) => "Discarding…",
+            Self::Discard(_) | Self::DiscardAll => "Discarding…",
             Self::Commit(_) => "Committing…",
             Self::Switch(_) | Self::Track(_) | Self::CreateBranch(_) => "Switching…",
             Self::Fetch => "Fetching…",
@@ -118,6 +120,18 @@ pub enum Event {
     /// The watched file changed on disk.
     FileChanged {
         rel: String,
+    },
+    /// Results of a search across the repository.
+    Search {
+        token: u64,
+        result: Result<SearchResults, String>,
+    },
+    /// Every file that quick open can offer.
+    Files(Vec<String>),
+    /// Who last changed each line of a file.
+    Blame {
+        rel: String,
+        lines: Vec<BlameLine>,
     },
     /// Syntax colors for text being edited, as it stood at `version`.
     EditHighlights {
@@ -180,6 +194,9 @@ pub struct Worker {
     file_generation: Arc<AtomicU64>,
     /// Likewise for re-highlighting text as it is edited.
     edit_generation: Arc<AtomicU64>,
+    /// And for searches: typing more cancels the search for what came before.
+    search_generation: Arc<AtomicU64>,
+    is_git: bool,
     next_token: u64,
 }
 
@@ -216,6 +233,8 @@ impl Worker {
             shared,
             file_generation: Arc::new(AtomicU64::new(0)),
             edit_generation: Arc::new(AtomicU64::new(0)),
+            search_generation: Arc::new(AtomicU64::new(0)),
+            is_git,
             next_token: 1,
         }
     }
@@ -283,6 +302,46 @@ impl Worker {
         }
     }
 
+    /// Searches file contents. A newer search cancels this one.
+    pub fn search(&mut self, query: String, options: SearchOptions) -> u64 {
+        let token = self.token();
+        self.search_generation.store(token, Ordering::Relaxed);
+        let generation = self.search_generation.clone();
+        let (root, outbox, is_git) = (self.root.clone(), self.outbox.clone(), self.is_git);
+        thread::spawn(move || {
+            let cancelled = || generation.load(Ordering::Relaxed) != token;
+            let result = git::search(&root, is_git, &query, options, &cancelled);
+            if !cancelled() {
+                outbox.send(Event::Search { token, result });
+            }
+        });
+        token
+    }
+
+    /// Lists the repository's files for quick open.
+    pub fn list_files(&self) {
+        let (root, outbox) = (self.root.clone(), self.outbox.clone());
+        thread::spawn(move || {
+            if let Ok(files) = git::list_files(&root) {
+                outbox.send(Event::Files(files));
+            }
+        });
+    }
+
+    /// Looks up who last changed each line of a file.
+    pub fn blame(&self, rel: &str) {
+        if !self.is_git {
+            return;
+        }
+        let (root, outbox, rel) = (self.root.clone(), self.outbox.clone(), rel.to_owned());
+        thread::spawn(move || {
+            // Untracked and brand-new files simply have no blame.
+            if let Ok(lines) = git::blame(&root, &rel) {
+                outbox.send(Event::Blame { rel, lines });
+            }
+        });
+    }
+
     /// Re-highlights text that is being edited. A newer request cancels this one.
     pub fn highlight_edit(&mut self, rel: &str, text: String, version: u64) {
         let token = self.token();
@@ -346,6 +405,7 @@ fn run_action(root: &Path, action: &Action) -> Result<(), String> {
         Action::StageAll => git::stage_all(root),
         Action::UnstageAll => git::unstage_all(root),
         Action::Discard(change) => git::discard(root, change),
+        Action::DiscardAll => git::discard_all(root),
         Action::Commit(message) => git::commit(root, message),
         Action::Switch(name) => git::switch_branch(root, name),
         Action::Track(remote_branch) => git::track_branch(root, remote_branch),

@@ -12,6 +12,7 @@ use std::cell::Cell;
 use std::sync::Arc;
 
 use crate::settings::{Accent, Settings, ThemeChoice};
+use crate::themes;
 
 // ── Palette ────────────────────────────────────────────────────────────────
 
@@ -31,108 +32,41 @@ pub mod syntax {
     pub const COUNT: usize = 10;
 }
 
-#[derive(Clone, Copy, PartialEq)]
-struct Palette {
-    dark: bool,
-    bg_shell: Color32,
-    bg_panel: Color32,
-    bg_elevated: Color32,
-    bg_input: Color32,
-    border: Color32,
-    border_strong: Color32,
-    text: Color32,
-    text_secondary: Color32,
-    text_muted: Color32,
-    text_faint: Color32,
-    accent: Color32,
-    accent_hover: Color32,
-    link: Color32,
-    green: Color32,
-    red: Color32,
-    yellow: Color32,
-    blue: Color32,
-    orange: Color32,
-    syntax: [Color32; syntax::COUNT],
-    code_size: f32,
+/// Every color the app draws with, plus the two metrics a theme can set.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Palette {
+    pub dark: bool,
+    pub bg_shell: Color32,
+    pub bg_panel: Color32,
+    pub bg_elevated: Color32,
+    pub bg_input: Color32,
+    pub border: Color32,
+    pub border_strong: Color32,
+    pub text: Color32,
+    pub text_secondary: Color32,
+    pub text_muted: Color32,
+    pub text_faint: Color32,
+    pub accent: Color32,
+    pub accent_hover: Color32,
+    pub link: Color32,
+    pub green: Color32,
+    pub red: Color32,
+    pub yellow: Color32,
+    pub blue: Color32,
+    pub orange: Color32,
+    pub syntax: [Color32; syntax::COUNT],
+    pub code_size: f32,
+    /// Corner radius of buttons, rows and inputs.
+    pub radius: u8,
 }
 
 const fn rgb(hex: u32) -> Color32 {
     Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
 }
 
-const DARK: Palette = Palette {
-    dark: true,
-    bg_shell: rgb(0x09090a),
-    bg_panel: rgb(0x101112),
-    bg_elevated: rgb(0x1a1b1d),
-    bg_input: rgb(0x141517),
-    border: rgb(0x1f2023),
-    border_strong: rgb(0x2c2d31),
-    text: rgb(0xe9eaec),
-    text_secondary: rgb(0x9a9da5),
-    text_muted: rgb(0x62666d),
-    text_faint: rgb(0x45484e),
-    accent: rgb(0x5e6ad2),
-    accent_hover: rgb(0x6c78e6),
-    link: rgb(0x828fff),
-    green: rgb(0x4cb782),
-    red: rgb(0xeb5757),
-    yellow: rgb(0xe2b94a),
-    blue: rgb(0x4ea7fc),
-    orange: rgb(0xf2994a),
-    syntax: [
-        rgb(0xd6d8dc), // text
-        rgb(0x6b6f77), // comment
-        rgb(0x9a9da5), // punctuation
-        rgb(0xa79df2), // keyword
-        rgb(0x8cc8a0), // string
-        rgb(0xe0a36a), // number
-        rgb(0x76cfc4), // escape
-        rgb(0x7db3f5), // function
-        rgb(0xe2c07c), // type
-        rgb(0xe8868b), // tag
-    ],
-    code_size: 12.5,
-};
-
-const LIGHT: Palette = Palette {
-    dark: false,
-    bg_shell: rgb(0xf3f4f6),
-    bg_panel: rgb(0xffffff),
-    bg_elevated: rgb(0xffffff),
-    bg_input: rgb(0xffffff),
-    border: rgb(0xe4e5e9),
-    border_strong: rgb(0xd3d5db),
-    text: rgb(0x1b1c20),
-    text_secondary: rgb(0x55585f),
-    text_muted: rgb(0x858890),
-    text_faint: rgb(0xb3b6bd),
-    accent: rgb(0x5e6ad2),
-    accent_hover: rgb(0x4f5bc4),
-    link: rgb(0x4a56c9),
-    green: rgb(0x23915b),
-    red: rgb(0xd13b3b),
-    yellow: rgb(0xa9790a),
-    blue: rgb(0x2676d0),
-    orange: rgb(0xc86f1e),
-    syntax: [
-        rgb(0x24262b), // text
-        rgb(0x8b8e96), // comment
-        rgb(0x5d6068), // punctuation
-        rgb(0x6a4fd0), // keyword
-        rgb(0x2a7d4c), // string
-        rgb(0xb05e14), // number
-        rgb(0x0e8073), // escape
-        rgb(0x1f61c4), // function
-        rgb(0x946500), // type
-        rgb(0xc0323a), // tag
-    ],
-    code_size: 12.5,
-};
-
 thread_local! {
     // Only the UI thread reads colors.
-    static CURRENT: Cell<Palette> = const { Cell::new(DARK) };
+    static CURRENT: Cell<Palette> = const { Cell::new(themes::FEATHER_DARK) };
     static STAMP: Cell<u64> = const { Cell::new(0) };
 }
 
@@ -146,20 +80,50 @@ fn palette() -> Palette {
     CURRENT.with(Cell::get)
 }
 
-/// (base, hover) for each accent, tuned separately for dark and light.
-fn accent_colors(accent: Accent, dark: bool) -> (Color32, Color32) {
-    let (base, lighter, darker) = match accent {
-        Accent::Indigo => (0x5e6ad2, 0x6c78e6, 0x4f5bc4),
-        Accent::Blue => (0x2f80ed, 0x4a93f5, 0x226fd8),
-        Accent::Green => (0x2f9e6b, 0x3bb37b, 0x25885a),
-        Accent::Orange => (0xd9772b, 0xe88a3f, 0xc26720),
-        Accent::Pink => (0xd1548e, 0xe0679f, 0xba437c),
-    };
-    (rgb(base), rgb(if dark { lighter } else { darker }))
+/// The color of each accent choice; `None` means "whatever the theme uses".
+pub fn accent_swatch(accent: Accent) -> Option<Color32> {
+    Some(rgb(match accent {
+        Accent::Theme => return None,
+        Accent::Indigo => 0x5e6ad2,
+        Accent::Blue => 0x2f80ed,
+        Accent::Green => 0x2f9e6b,
+        Accent::Orange => 0xd9772b,
+        Accent::Pink => 0xd1548e,
+    }))
 }
 
-pub fn accent_swatch(accent: Accent) -> Color32 {
-    accent_colors(accent, true).0
+/// The palette the settings ask for, given whether the system is in dark mode.
+pub fn resolve(settings: &Settings, system_dark: bool) -> Palette {
+    let dark = match settings.theme {
+        ThemeChoice::Dark => true,
+        ThemeChoice::Light => false,
+        ThemeChoice::System => system_dark,
+    };
+    let custom = settings
+        .custom_themes
+        .iter()
+        .find(|t| t.id() == settings.theme_name)
+        .and_then(|t| themes::import_css(&t.css).ok())
+        .and_then(|t| t.pick(dark));
+    let mut palette = custom.unwrap_or_else(|| {
+        let presets = themes::presets();
+        let preset = presets
+            .iter()
+            .find(|p| p.id == settings.theme_name)
+            .unwrap_or(&presets[0]);
+        if dark { preset.dark } else { preset.light }
+    });
+    if let Some(accent) = accent_swatch(settings.accent) {
+        let pop = if palette.dark {
+            Color32::WHITE
+        } else {
+            Color32::BLACK
+        };
+        palette.accent = accent;
+        palette.accent_hover = themes::mix(accent, pop, 0.14);
+    }
+    palette.code_size = settings.font_size;
+    palette
 }
 
 pub fn is_dark() -> bool {
@@ -205,6 +169,14 @@ pub fn accent() -> Color32 {
 }
 pub fn accent_hover() -> Color32 {
     palette().accent_hover
+}
+/// Text and icons drawn on top of the accent color.
+pub fn on_accent() -> Color32 {
+    if themes::luminance(palette().accent) > 0.45 {
+        Color32::from_rgb(0x14, 0x14, 0x16)
+    } else {
+        Color32::WHITE
+    }
 }
 pub fn green() -> Color32 {
     palette().green
@@ -260,7 +232,15 @@ pub fn diff_del_bg() -> Color32 {
 pub const ROW_HEIGHT: f32 = 28.0;
 pub const HEADER_HEIGHT: f32 = 44.0;
 pub const TITLEBAR_HEIGHT: f32 = 38.0;
-pub const RADIUS: u8 = 6;
+
+/// Corner radius of buttons, rows and inputs, set by the theme.
+pub fn radius() -> u8 {
+    palette().radius
+}
+/// Corner radius of panels, popups and dialogs.
+pub fn panel_radius() -> u8 {
+    (palette().radius + 2).min(14)
+}
 
 pub fn code_size() -> f32 {
     palette().code_size
@@ -321,6 +301,8 @@ pub mod icon {
     pub const CLOSE: &str = "\u{E4F6}";
     pub const DOWNLOAD: &str = "\u{E20C}";
     pub const INFO: &str = "\u{E2CE}";
+    pub const SEARCH: &str = "\u{E30C}";
+    pub const TERMINAL: &str = "\u{EAE8}";
 }
 
 /// Loads the fonts. Call once, at startup.
@@ -369,32 +351,30 @@ pub fn install_fonts(ctx: &egui::Context) {
 /// Applies the user's theme, accent, zoom and font size. Cheap to call again;
 /// returns whether anything visible changed.
 pub fn apply(ctx: &egui::Context, settings: &Settings) -> bool {
-    let dark = match settings.theme {
-        ThemeChoice::Dark => true,
-        ThemeChoice::Light => false,
-        ThemeChoice::System => ctx.system_theme() != Some(egui::Theme::Light),
-    };
-    let mut next = if dark { DARK } else { LIGHT };
-    (next.accent, next.accent_hover) = accent_colors(settings.accent, dark);
-    next.code_size = settings.font_size;
-
     let zoom_changed = (ctx.zoom_factor() - settings.zoom).abs() > 0.001;
     if zoom_changed {
         ctx.set_zoom_factor(settings.zoom);
     }
-    if next == palette()
-        && !zoom_changed
-        && ctx
-            .data(|d| d.get_temp::<bool>(egui::Id::unique(STYLED)))
-            .is_some()
-    {
+    // Resolving a theme can mean parsing CSS, so only do it when an input changed.
+    let system_dark = ctx.system_theme() != Some(egui::Theme::Light);
+    let signature = egui::util::hash((
+        &settings.theme_name,
+        settings.theme,
+        settings.accent,
+        settings.font_size.to_bits(),
+        system_dark,
+        &settings.custom_themes,
+    ));
+    let styled = egui::Id::unique(STYLED);
+    if ctx.data(|d| d.get_temp::<u64>(styled)) == Some(signature) && !zoom_changed {
         return false;
     }
+    ctx.data_mut(|d| d.insert_temp(styled, signature));
+
+    let next = resolve(settings, system_dark);
     CURRENT.with(|current| current.set(next));
     STAMP.with(|stamp| stamp.set(stamp.get() + 1));
-    ctx.data_mut(|d| d.insert_temp(egui::Id::unique(STYLED), true));
-
-    ctx.set_theme(if dark {
+    ctx.set_theme(if next.dark {
         egui::Theme::Dark
     } else {
         egui::Theme::Light
@@ -452,8 +432,8 @@ fn style_egui(style: &mut egui::Style, p: &Palette) {
     v.panel_fill = p.bg_shell;
     v.window_fill = p.bg_elevated;
     v.window_stroke = Stroke::new(1.0, p.border_strong);
-    v.window_corner_radius = CornerRadius::same(10);
-    v.menu_corner_radius = CornerRadius::same(8);
+    v.window_corner_radius = CornerRadius::same((p.radius + 4).min(16));
+    v.menu_corner_radius = CornerRadius::same((p.radius + 2).min(14));
     v.extreme_bg_color = p.bg_input;
     v.text_edit_bg_color = Some(p.bg_input);
     v.faint_bg_color = wash(6);
@@ -477,7 +457,7 @@ fn style_egui(style: &mut egui::Style, p: &Palette) {
     v.window_shadow = shadow(120, 28, 8);
     v.popup_shadow = shadow(110, 20, 6);
 
-    let radius = CornerRadius::same(RADIUS);
+    let radius = CornerRadius::same(p.radius);
     let w = &mut v.widgets;
     w.noninteractive.bg_fill = p.bg_panel;
     w.noninteractive.weak_bg_fill = p.bg_panel;
