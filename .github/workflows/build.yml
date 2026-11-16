@@ -1,8 +1,12 @@
 name: Build
 
+# The website and docs don't affect the app, so they don't trigger a build.
 on:
   push:
+    branches: ['**']
+    paths-ignore: ['site/**', 'tools/build-site.mjs', 'vercel.json', '**.md']
   pull_request:
+    paths-ignore: ['site/**', 'tools/build-site.mjs', 'vercel.json', '**.md']
   workflow_dispatch:
 
 concurrency:
