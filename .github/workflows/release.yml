@@ -1,0 +1,114 @@
+name: Release
+
+# Run from the Actions tab (or the API) with the version to publish. Builds the
+# three downloads, then creates the tag and the GitHub release in one go.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release; must match Cargo.toml (for example 0.1.0)
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  VERSION: ${{ inputs.version }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version matches Cargo.toml and is not released yet
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          crate="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          if [ "$crate" != "$VERSION" ]; then
+            echo "::error::Cargo.toml is at $crate, not $VERSION"; exit 1
+          fi
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "::error::v$VERSION is already released"; exit 1
+          fi
+          if ! grep -q "^## $VERSION\b" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no section for $VERSION"; exit 1
+          fi
+
+  build:
+    needs: check
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # An older Ubuntu, so the binary runs on older distributions too.
+          - os: ubuntu-22.04
+            asset: feather-linux-x86_64.tar.gz
+          - os: macos-latest
+            asset: feather-macos-universal.zip
+          - os: windows-latest
+            asset: feather-windows-x86_64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build --release --locked
+          tar -czf "${{ matrix.asset }}" -C target/release feather
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cargo build --release --locked
+          cp target/release/feather.exe "${{ matrix.asset }}"
+
+      - name: Build (macOS, universal)
+        if: runner.os == 'macOS'
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '11.0'
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+          tools/bundle-macos.sh "$VERSION"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums and notes
+        run: |
+          cd dist
+          sha256sum feather-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          cd ..
+          # The notes are this version's section of the changelog.
+          awk -v v="$VERSION" '
+            /^## / { on = ($2 == v); next }
+            on { print }
+          ' CHANGELOG.md | sed -e '/./,$!d' > notes.md
+          cat notes.md
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v$VERSION" dist/* \
+            --target "$GITHUB_SHA" \
+            --title "Feather $VERSION" \
+            --notes-file notes.md
