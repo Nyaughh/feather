@@ -170,6 +170,14 @@ fn body(ui: &mut Ui, settings: &mut Settings, updater: &Updater, cmds: &mut Vec<
         },
     );
 
+    section(ui, "Git");
+    row(
+        ui,
+        "Fetch automatically",
+        "Check the remote every few minutes for new branches and commits.",
+        |ui| toggle(ui, "auto_fetch", &mut settings.auto_fetch),
+    );
+
     section(ui, "Updates");
     row(
         ui,

@@ -370,20 +370,63 @@ pub fn commit(root: &Path, message: &str) -> Result<()> {
 
 // ── Branches, worktrees, remotes ───────────────────────────────────────────
 
-pub fn branches(root: &Path) -> Result<Vec<String>> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Branch {
+    /// The branch's own name, e.g. `feature/login`.
+    pub name: String,
+    /// For a branch that so far only exists on a remote: its remote-tracking
+    /// name, e.g. `origin/feature/login`. `None` for local branches.
+    pub remote: Option<String>,
+}
+
+/// Local branches, most recently committed first, followed by branches that
+/// exist on a remote but have not been checked out here yet.
+pub fn branches(root: &Path) -> Result<Vec<Branch>> {
     let out = run_text(
         root,
         &[
-            "branch",
-            "--format=%(refname:short)",
+            "for-each-ref",
             "--sort=-committerdate",
+            "--format=%(refname)",
+            "refs/heads",
+            "refs/remotes",
         ],
     )?;
-    Ok(out
-        .lines()
-        .filter(|l| !l.is_empty() && !l.starts_with('('))
-        .map(str::to_owned)
-        .collect())
+    Ok(parse_branches(&out))
+}
+
+fn parse_branches(refs: &str) -> Vec<Branch> {
+    let mut local = Vec::new();
+    let mut remote = Vec::new();
+    for line in refs.lines() {
+        if let Some(name) = line.strip_prefix("refs/heads/") {
+            local.push(Branch {
+                name: name.to_owned(),
+                remote: None,
+            });
+        } else if let Some(tracking) = line.strip_prefix("refs/remotes/")
+            && let Some((_, name)) = tracking.split_once('/')
+            && name != "HEAD"
+        {
+            remote.push(Branch {
+                name: name.to_owned(),
+                remote: Some(tracking.to_owned()),
+            });
+        }
+    }
+    // A remote branch that is already checked out locally is listed once, and
+    // so is one that several remotes share.
+    let mut seen: std::collections::HashSet<String> =
+        local.iter().map(|b| b.name.clone()).collect();
+    remote.retain(|b| seen.insert(b.name.clone()));
+    local.extend(remote);
+    local
+}
+
+/// Checks out a branch that only exists on a remote, creating the local
+/// branch that tracks it.
+pub fn track_branch(root: &Path, remote_branch: &str) -> Result<()> {
+    run(root, &["switch", "-q", "--track", remote_branch]).map(drop)
 }
 
 pub fn switch_branch(root: &Path, name: &str) -> Result<()> {
@@ -449,6 +492,24 @@ pub fn worktrees(root: &Path) -> Result<Vec<Worktree>> {
 
 pub fn fetch(root: &Path) -> Result<()> {
     run(root, &["fetch", "--prune", "-q"]).map(drop)
+}
+
+/// A fetch nobody asked for: it must never put a login prompt on screen.
+pub fn fetch_in_background(root: &Path) -> Result<()> {
+    let mut cmd = command(root);
+    cmd.env("GCM_INTERACTIVE", "never").args([
+        "-c",
+        "credential.interactive=false",
+        "fetch",
+        "--prune",
+        "-q",
+    ]);
+    let out = exec(cmd)?;
+    if out.ok {
+        Ok(())
+    } else {
+        Err(error_text(&out, &["fetch"]))
+    }
 }
 
 pub fn pull(root: &Path) -> Result<()> {
@@ -641,9 +702,33 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
 
         create_branch(root, "feature/x").unwrap();
         assert_eq!(repo.status().branch.as_deref(), Some("feature/x"));
-        let mut all = branches(root).unwrap();
+        let mut all: Vec<String> = branches(root)
+            .unwrap()
+            .into_iter()
+            .map(|b| b.name)
+            .collect();
         all.sort();
         assert_eq!(all, ["feature/x", "main"]);
+
+        // A branch that only exists on a remote is listed, and can be checked out.
+        repo.git(&[
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/repo.git",
+        ]);
+        repo.git(&["update-ref", "refs/remotes/origin/from-remote", "HEAD"]);
+        repo.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        let listed = branches(root).unwrap();
+        let remote_only: Vec<_> = listed.iter().filter(|b| b.remote.is_some()).collect();
+        assert_eq!(remote_only.len(), 1, "origin/main is already local");
+        assert_eq!(remote_only[0].name, "from-remote");
+        assert_eq!(remote_only[0].remote.as_deref(), Some("origin/from-remote"));
+        track_branch(root, "origin/from-remote").unwrap();
+        let st = repo.status();
+        assert_eq!(st.branch.as_deref(), Some("from-remote"));
+        assert_eq!(st.upstream.as_deref(), Some("origin/from-remote"));
+        switch_branch(root, "main").unwrap();
         switch_branch(root, "main").unwrap();
         assert_eq!(repo.status().branch.as_deref(), Some("main"));
         assert!(switch_branch(root, "does-not-exist").is_err());
@@ -654,6 +739,27 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
         assert_eq!(
             find_root(&root.join(".")).map(|p| p.canonicalize().unwrap()),
             Some(root.canonicalize().unwrap())
+        );
+    }
+
+    #[test]
+    fn lists_local_branches_before_remote_only_ones() {
+        let refs = "refs/heads/main\nrefs/remotes/origin/HEAD\nrefs/remotes/origin/aarin/tn-case-type\n\
+                    refs/remotes/origin/main\nrefs/heads/topic\nrefs/remotes/fork/aarin/tn-case-type\n";
+        let names: Vec<_> = parse_branches(refs)
+            .into_iter()
+            .map(|b| (b.name, b.remote))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("main".to_owned(), None),
+                ("topic".to_owned(), None),
+                (
+                    "aarin/tn-case-type".to_owned(),
+                    Some("origin/aarin/tn-case-type".to_owned())
+                ),
+            ]
         );
     }
 

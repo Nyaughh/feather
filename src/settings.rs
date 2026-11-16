@@ -68,6 +68,10 @@ pub struct Settings {
     /// Save edits automatically a moment after typing stops.
     pub auto_save: bool,
 
+    /// Fetch from the remote every few minutes, so new branches and commits
+    /// show up without asking.
+    pub auto_fetch: bool,
+
     /// Look for a new version on launch and every few hours.
     pub auto_update: bool,
 }
@@ -86,6 +90,7 @@ impl Default for Settings {
             tab_size: 4,
             insert_spaces: true,
             auto_save: false,
+            auto_fetch: true,
             auto_update: true,
         }
     }

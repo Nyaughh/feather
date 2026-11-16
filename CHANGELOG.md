@@ -6,6 +6,8 @@
 - **Its own title bar**: the window buttons and a sidebar toggle now sit in a bar that matches the rest of the app.
 - **Settings**: dark, light or system theme, accent colour, interface size, code font size, line wrap, line numbers, indentation and auto save. Open them from the gear in the title bar.
 - **Updates**: Feather checks for new versions and offers to install them from a prompt in the corner. You can also check from Settings.
+- **Branches from the remote**: the branch picker now lists branches that only exist on the remote, and checks them out with one click. Feather fetches every few minutes so new ones appear on their own (this can be turned off in Settings).
+- Copy and paste now work everywhere, including the branch filter and the commit box, and links in Markdown open in your browser.
 - The repository switcher shows just the name, and the worktree and branch pickers share one row.
 
 This is the last version you need to download by hand: from here on Feather can update itself.
