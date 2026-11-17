@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.1
+
+- **Feather is the default theme again.** Version 0.4.0 switched everyone to a new theme by mistake. This update puts you back on Feather.
+- The new theme is now called **Claude** and is one of the choices in Settings, next to Feather.
+
 ## 0.4.0
 
 - **A new default look**: Clay, a warm paper-and-terracotta theme from tweakcn, is what Feather now starts with, in light and dark. If you were on the Feather theme you are moved to Clay once; Feather is still there in Settings.

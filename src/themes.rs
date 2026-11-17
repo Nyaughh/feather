@@ -133,7 +133,7 @@ impl Seed {
 }
 
 /// The id of the theme a new install uses.
-pub const DEFAULT_THEME: &str = "clay";
+pub const DEFAULT_THEME: &str = "feather";
 
 pub struct Preset {
     pub id: &'static str,
@@ -355,11 +355,12 @@ const TOKYO_DAY: Seed = seed(
     ],
 );
 
-/// The theme new installs start with: warm paper and terracotta, from
-/// tweakcn.com/themes/cmdght103000n04lh3e2ae93r. Its surfaces come from the CSS; the code colors are chosen by
-/// hand, because the theme's chart colors are too close to its backgrounds.
-fn clay() -> Preset {
-    let theme = import_css(include_str!("../assets/themes/clay.css"));
+/// tweakcn's "Claude" theme: warm paper and terracotta, from
+/// tweakcn.com/themes/cmdght103000n04lh3e2ae93r. Its surfaces come from the
+/// CSS; the code colors are chosen by hand, because the theme's chart colors
+/// are too close to its backgrounds.
+fn claude() -> Preset {
+    let theme = import_css(include_str!("../assets/themes/claude.css"));
     let half = |palette: Option<Palette>, fallback: Palette, code: [u32; 7]| {
         let mut palette = palette.unwrap_or(fallback);
         for (class, hex) in [
@@ -380,8 +381,8 @@ fn clay() -> Preset {
     };
     let (light, dark) = theme.map_or((None, None), |t| (t.light, t.dark));
     Preset {
-        id: DEFAULT_THEME,
-        name: "Clay",
+        id: "claude",
+        name: "Claude",
         // Code colors: keyword, string, number, escape, function, type, tag.
         dark: half(
             dark,
@@ -411,13 +412,13 @@ pub fn presets() -> &'static [Preset] {
             light: light.palette(),
         };
         vec![
-            clay(),
             Preset {
-                id: "feather",
+                id: DEFAULT_THEME,
                 name: "Feather",
                 dark: FEATHER_DARK,
                 light: FEATHER_LIGHT,
             },
+            claude(),
             Preset {
                 id: "midnight",
                 name: "Midnight",

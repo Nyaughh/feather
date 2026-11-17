@@ -134,14 +134,15 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Applies changes of default to settings saved by an older version, once.
+    /// Applies one-time corrections to settings saved by an older version.
     pub fn migrate(&mut self) {
-        // 1: Clay became the default theme. Move over anyone still on the old
-        // default; choosing Feather again afterwards sticks.
-        if self.revision < 1 && self.theme_name == "feather" {
+        // 2: version 0.4.0 made a theme it called Clay the default and moved
+        // everyone on Feather over to it. That was a mistake: Feather is the
+        // default, and the other theme is now called Claude. Put them back.
+        if self.revision < 2 && self.theme_name == "clay" {
             self.theme_name = crate::themes::DEFAULT_THEME.to_owned();
         }
-        self.revision = 1;
+        self.revision = 2;
     }
 
     /// Brings values loaded from disk back into their valid ranges.
