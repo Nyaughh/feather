@@ -97,8 +97,15 @@ pub struct Settings {
     /// show up without asking.
     pub auto_fetch: bool,
 
+    /// Show who last changed the line the cursor is on.
+    pub blame: bool,
+
     /// Look for a new version on launch and every few hours.
     pub auto_update: bool,
+
+    /// How many one-time changes to saved settings have been made. See
+    /// [`Settings::migrate`].
+    pub revision: u32,
 }
 
 impl Default for Settings {
@@ -107,7 +114,7 @@ impl Default for Settings {
             recent: Vec::new(),
             sidebar_open: true,
             theme: ThemeChoice::System,
-            theme_name: "feather".to_owned(),
+            theme_name: crate::themes::DEFAULT_THEME.to_owned(),
             custom_themes: Vec::new(),
             accent: Accent::Theme,
             zoom: 1.0,
@@ -119,12 +126,24 @@ impl Default for Settings {
             auto_save: false,
             shell: String::new(),
             auto_fetch: true,
+            blame: true,
             auto_update: true,
+            revision: 0,
         }
     }
 }
 
 impl Settings {
+    /// Applies changes of default to settings saved by an older version, once.
+    pub fn migrate(&mut self) {
+        // 1: Clay became the default theme. Move over anyone still on the old
+        // default; choosing Feather again afterwards sticks.
+        if self.revision < 1 && self.theme_name == "feather" {
+            self.theme_name = crate::themes::DEFAULT_THEME.to_owned();
+        }
+        self.revision = 1;
+    }
+
     /// Brings values loaded from disk back into their valid ranges.
     pub fn sanitize(&mut self) {
         self.font_size = self.font_size.clamp(*FONT_SIZES.start(), *FONT_SIZES.end());

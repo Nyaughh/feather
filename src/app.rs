@@ -4,6 +4,7 @@ use eframe::egui;
 use egui_commonmark::CommonMarkCache;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
@@ -238,6 +239,9 @@ pub struct FileView {
     pub cursor: Option<(usize, usize)>,
     /// The character index `cursor` was worked out from.
     pub cursor_index: Option<(u64, usize)>,
+    /// The character index where the cursor's line ends, which is where the
+    /// blame note for it is drawn.
+    pub line_end: Option<usize>,
 }
 
 impl FileView {
@@ -425,6 +429,7 @@ impl Repo {
             blame: None,
             cursor: None,
             cursor_index: None,
+            line_end: None,
         });
     }
 
@@ -519,6 +524,27 @@ impl Repo {
         self.worker.blame(&view.rel);
         self.worker.refresh();
         Ok(())
+    }
+
+    /// Follows the blame setting: looks it up for the open file when turned
+    /// on, forgets it when turned off.
+    fn set_blame(&mut self, on: bool) {
+        if !self.worker.set_blame(on) {
+            return;
+        }
+        if let View::File(view) = &mut self.view {
+            if !on {
+                view.blame = None;
+            } else if matches!(
+                view.file,
+                Some(LoadedFile {
+                    body: Body::Text(_),
+                    ..
+                })
+            ) {
+                self.worker.blame(&view.rel);
+            }
+        }
     }
 
     /// Drops unsaved edits without touching the file.
@@ -734,6 +760,7 @@ pub struct App {
     pub settings_open: bool,
     /// The action waiting on "save your changes first?".
     pub confirm_leave: Option<Cmd>,
+    images: Arc<crate::images::Loader>,
     folder_dialog: Option<Receiver<Option<PathBuf>>>,
     was_focused: bool,
     /// Set once the user has agreed to close with (or without) saving.
@@ -746,14 +773,15 @@ impl App {
             .storage
             .and_then(|s| eframe::get_value(s, SETTINGS_KEY))
             .unwrap_or_default();
+        settings.migrate();
         settings.sanitize();
 
         theme::install_fonts(&cc.egui_ctx);
         theme::apply(&cc.egui_ctx, &settings);
         egui_extras::install_image_loaders(&cc.egui_ctx);
-        // Added last, so it gets first refusal on anything that is an SVG.
-        cc.egui_ctx
-            .add_image_loader(std::sync::Arc::new(crate::svg::SvgLoader::new()));
+        // Added last, so every image comes to it first.
+        let images = Arc::new(crate::images::Loader::new());
+        cc.egui_ctx.add_image_loader(images.clone());
         ui::titlebar::prepare_window(cc);
 
         let mut app = Self {
@@ -765,6 +793,7 @@ impl App {
             updater: Updater::new(&cc.egui_ctx),
             settings_open: false,
             confirm_leave: None,
+            images,
             folder_dialog: None,
             was_focused: true,
             closing: false,
@@ -781,6 +810,8 @@ impl App {
         let path = path.canonicalize().unwrap_or_else(|_| path.to_owned());
         let path = strip_verbatim(path);
         let repo = Repo::open(&path, ctx);
+        let github = repo.is_git.then(|| git::github_slug(&repo.root)).flatten();
+        self.images.set_repository(&repo.root, github);
         self.settings.recent.retain(|p| *p != repo.root);
         self.settings.recent.insert(0, repo.root.clone());
         self.settings.recent.truncate(MAX_RECENT);
@@ -832,6 +863,7 @@ impl App {
                 repo.handle(event, &mut self.toast, ctx);
             }
             repo.worker.set_auto_fetch(self.settings.auto_fetch);
+            repo.set_blame(self.settings.blame);
             repo.terminals.pump();
 
             // Search a moment after typing stops, not on every keystroke.

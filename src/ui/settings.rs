@@ -206,6 +206,12 @@ fn body(ui: &mut Ui, settings: &mut Settings, updater: &Updater, cmds: &mut Vec<
         "Check the remote every few minutes for new branches and commits.",
         |ui| toggle(ui, "auto_fetch", &mut settings.auto_fetch),
     );
+    row(
+        ui,
+        "Show blame",
+        "Beside the line the cursor is on: who last changed it, when, and why.",
+        |ui| toggle(ui, "blame", &mut settings.blame),
+    );
 
     section(ui, "Updates");
     row(
@@ -418,7 +424,7 @@ fn theme_grid(ui: &mut Ui, settings: &mut Settings, cmds: &mut Vec<Cmd>) {
 
     // (id, name, palette, is custom)
     let mut cards: Vec<(String, String, theme::Palette, bool)> = themes::presets()
-        .into_iter()
+        .iter()
         .map(|p| {
             let palette = if dark { p.dark } else { p.light };
             (p.id.to_owned(), p.name.to_owned(), palette, false)
@@ -499,7 +505,7 @@ fn theme_grid(ui: &mut Ui, settings: &mut Settings, cmds: &mut Vec<Cmd>) {
     if let Some(id) = remove {
         settings.custom_themes.retain(|t| t.id() != id);
         if settings.theme_name == id {
-            settings.theme_name = "feather".to_owned();
+            settings.theme_name = themes::DEFAULT_THEME.to_owned();
         }
     }
     ui.horizontal(|ui| {

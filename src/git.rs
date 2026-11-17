@@ -85,6 +85,24 @@ pub fn find_root(path: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(line))
 }
 
+/// `owner/name` when the repository's `origin` is on GitHub.
+pub fn github_slug(root: &Path) -> Option<String> {
+    let url = run_text(root, &["config", "--get", "remote.origin.url"]).ok()?;
+    parse_github_slug(url.trim())
+}
+
+fn parse_github_slug(url: &str) -> Option<String> {
+    // https://github.com/owner/name.git, git@github.com:owner/name.git,
+    // ssh://git@github.com/owner/name
+    let (_, rest) = url.split_once("github.com")?;
+    let rest = rest.strip_prefix([':', '/'])?;
+    let rest = rest.trim_end_matches('/');
+    let rest = rest.strip_suffix(".git").unwrap_or(rest);
+    let (owner, name) = rest.split_once('/')?;
+    (!owner.is_empty() && !name.is_empty() && !name.contains('/'))
+        .then(|| format!("{owner}/{name}"))
+}
+
 // ── Status ─────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -747,6 +765,26 @@ fn parse_blame(porcelain: &str) -> Vec<BlameLine> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_the_github_repository_from_a_remote_address() {
+        for url in [
+            "https://github.com/Nyaughh/feather.git",
+            "https://github.com/Nyaughh/feather",
+            "https://user@github.com/Nyaughh/feather/",
+            "git@github.com:Nyaughh/feather.git",
+            "ssh://git@github.com/Nyaughh/feather.git",
+        ] {
+            assert_eq!(
+                parse_github_slug(url).as_deref(),
+                Some("Nyaughh/feather"),
+                "{url}"
+            );
+        }
+        assert_eq!(parse_github_slug("https://gitlab.com/a/b.git"), None);
+        assert_eq!(parse_github_slug("https://github.com/only-owner"), None);
+        assert_eq!(parse_github_slug("/srv/git/feather.git"), None);
+    }
 
     #[test]
     fn parses_porcelain_v2() {

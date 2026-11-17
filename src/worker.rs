@@ -148,6 +148,7 @@ struct Shared {
     active: AtomicBool,
     /// Fetch from the remote every so often.
     auto_fetch: AtomicBool,
+    blame: AtomicBool,
     /// A background fetch is running / has just finished.
     fetching: AtomicBool,
     fetched: AtomicBool,
@@ -254,6 +255,11 @@ impl Worker {
     }
 
     /// Whether to fetch from the remote every few minutes.
+    /// Turns blame lookups on or off. Returns whether that changed anything.
+    pub fn set_blame(&self, on: bool) -> bool {
+        self.shared.blame.swap(on, Ordering::Relaxed) != on
+    }
+
     pub fn set_auto_fetch(&self, on: bool) {
         self.shared.auto_fetch.store(on, Ordering::Relaxed);
     }
@@ -330,7 +336,7 @@ impl Worker {
 
     /// Looks up who last changed each line of a file.
     pub fn blame(&self, rel: &str) {
-        if !self.is_git {
+        if !self.is_git || !self.shared.blame.load(Ordering::Relaxed) {
             return;
         }
         let (root, outbox, rel) = (self.root.clone(), self.outbox.clone(), rel.to_owned());

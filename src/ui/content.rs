@@ -18,7 +18,7 @@ use super::{virtual_rows, virtual_rows_from};
 use crate::app::{Cmd, DiffView, EditBuffer, FileView, FindBar, Jump, Repo, View};
 use crate::diff::{Diff, DiffLine, LineKind};
 use crate::document::{self, Body, Highlights, LoadedFile, Preview, Span, TextDoc};
-use crate::git::ChangeKind;
+use crate::git::{BlameLine, ChangeKind};
 use crate::settings::Settings;
 use crate::theme::{self, HEADER_HEIGHT, icon, syntax};
 use crate::worker::Action;
@@ -282,6 +282,8 @@ fn file_body(
         find,
         cursor,
         cursor_index,
+        line_end,
+        blame,
         ..
     } = view;
     let Some(file) = file else { return };
@@ -299,11 +301,15 @@ fn file_body(
                     if find.is_some() {
                         find_bar(ui, buffer, find, jump);
                     }
+                    // Blame describes the saved file, so it hides while there are edits.
+                    let blame = blame.as_deref().filter(|_| settings.blame && !buffer.dirty);
                     let state = EditorState {
                         jump,
                         find: find.as_ref(),
                         cursor,
                         cursor_index,
+                        line_end,
+                        blame,
                     };
                     editor_view(ui, rel, buffer, state, settings, cmds);
                 }
@@ -405,6 +411,9 @@ struct EditorState<'a> {
     find: Option<&'a FindBar>,
     cursor: &'a mut Option<(usize, usize)>,
     cursor_index: &'a mut Option<(u64, usize)>,
+    line_end: &'a mut Option<usize>,
+    /// Who last changed each line, when that is known and wanted.
+    blame: Option<&'a [BlameLine]>,
 }
 
 /// The byte range of the text a jump refers to.
@@ -723,6 +732,32 @@ fn editor_view(
                     }
                     (line, column)
                 });
+                *state.line_end = index.map(|index| {
+                    index + text.chars().skip(index).take_while(|c| *c != '\n').count()
+                });
+            }
+
+            // Who last changed the line the cursor is on, written after its end.
+            if let Some(lines) = state.blame
+                && let (Some((line, _)), Some(end)) = (*state.cursor, *state.line_end)
+                && let Some(blame) = lines.get(line - 1)
+            {
+                let end = output
+                    .galley
+                    .pos_from_cursor(CCursor::new(end))
+                    .translate(origin);
+                let x = end.right() + char_w * 4.0;
+                let room = ui.clip_rect().right() - 16.0 - x;
+                if room > 120.0 {
+                    let note = elided(
+                        ui,
+                        &blame_text(blame),
+                        theme::ui_font(theme::code_size() - 0.5),
+                        theme::text_faint(),
+                        room,
+                    );
+                    paint_galley(ui, x, end.center().y, note);
+                }
             }
 
             // Mark what find-in-file found: every match faintly, the current one more.
@@ -907,6 +942,19 @@ fn markdown_view(
         .map(|dir| format!("file://{}/", dir.display()))
         .unwrap_or_else(|| "file://".to_owned());
 
+    // HTML in the document is turned into Markdown once, not every frame.
+    let stamp = egui::util::hash(text);
+    let memory = Id::unique(("prepared_markdown", rel));
+    let prepared = ui
+        .data(|data| data.get_temp::<Arc<(u64, String)>>(memory))
+        .filter(|cached| cached.0 == stamp)
+        .unwrap_or_else(|| {
+            let fresh = Arc::new((stamp, crate::markdown::prepare(text).into_owned()));
+            ui.data_mut(|data| data.insert_temp(memory, fresh.clone()));
+            fresh
+        });
+    let prepared = prepared.1.as_str();
+
     ScrollArea::vertical()
         .id_salt(("markdown", rel))
         .auto_shrink(false)
@@ -945,7 +993,7 @@ fn markdown_view(
                     CommonMarkViewer::new()
                         .default_implicit_uri_scheme(base)
                         .max_image_width(Some(column as usize))
-                        .show(ui, cache, text);
+                        .show(ui, cache, prepared);
                 });
             });
             ui.add_space(56.0);
@@ -972,6 +1020,22 @@ fn time_ago(then: i64, now: i64) -> String {
 
 /// The strip under a file: cursor position, who last changed the current
 /// line, and how the file is indented and terminated.
+/// "Ada Lovelace, 3 days ago · Fix the parser"
+fn blame_text(blame: &BlameLine) -> String {
+    if blame.commit.is_none() {
+        return "Not committed yet".to_owned();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    format!(
+        "{}, {} · {}",
+        blame.author,
+        time_ago(blame.time, now),
+        blame.summary
+    )
+}
+
 fn status_bar(ui: &mut Ui, view: &FileView, settings: &Settings) {
     let rect = ui.max_rect();
     ui.allocate_rect(rect, Sense::hover());
@@ -1021,21 +1085,10 @@ fn status_bar(ui: &mut Ui, view: &FileView, settings: &Settings) {
     let blame = view
         .blame
         .as_ref()
-        .filter(|_| !view.is_dirty())
+        .filter(|_| settings.blame && !view.is_dirty())
         .and_then(|lines| lines.get(line - 1));
     if let Some(blame) = blame {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs() as i64);
-        let text = match &blame.commit {
-            Some(_) => format!(
-                "{}, {} · {}",
-                blame.author,
-                time_ago(blame.time, now),
-                blame.summary
-            ),
-            None => "Not committed yet".to_owned(),
-        };
+        let text = blame_text(blame);
         let galley = elided(ui, &text, font, muted, right - x);
         paint_galley(ui, x, mid, galley);
     }

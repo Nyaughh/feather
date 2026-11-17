@@ -10,6 +10,7 @@
 
 use eframe::egui::Color32;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use crate::theme::{Palette, syntax};
 
@@ -34,6 +35,17 @@ pub fn luminance(c: Color32) -> f32 {
         }
     };
     0.2126 * channel(c.r()) + 0.7152 * channel(c.g()) + 0.0722 * channel(c.b())
+}
+
+/// How far a color is from gray, from 0 to 1.
+fn saturation(c: Color32) -> f32 {
+    let max = c.r().max(c.g()).max(c.b());
+    let min = c.r().min(c.g()).min(c.b());
+    if max == 0 {
+        0.0
+    } else {
+        f32::from(max - min) / f32::from(max)
+    }
 }
 
 fn contrast(a: Color32, b: Color32) -> f32 {
@@ -119,6 +131,9 @@ impl Seed {
         }
     }
 }
+
+/// The id of the theme a new install uses.
+pub const DEFAULT_THEME: &str = "clay";
 
 pub struct Preset {
     pub id: &'static str,
@@ -340,37 +355,87 @@ const TOKYO_DAY: Seed = seed(
     ],
 );
 
-pub fn presets() -> Vec<Preset> {
-    let pair = |id, name, dark: Seed, light: Seed| Preset {
-        id,
-        name,
-        dark: dark.palette(),
-        light: light.palette(),
+/// The theme new installs start with: warm paper and terracotta, from
+/// tweakcn.com/themes/cmdght103000n04lh3e2ae93r. Its surfaces come from the CSS; the code colors are chosen by
+/// hand, because the theme's chart colors are too close to its backgrounds.
+fn clay() -> Preset {
+    let theme = import_css(include_str!("../assets/themes/clay.css"));
+    let half = |palette: Option<Palette>, fallback: Palette, code: [u32; 7]| {
+        let mut palette = palette.unwrap_or(fallback);
+        for (class, hex) in [
+            syntax::KEYWORD,
+            syntax::STRING,
+            syntax::NUMBER,
+            syntax::ESCAPE,
+            syntax::FUNCTION,
+            syntax::TYPE,
+            syntax::TAG,
+        ]
+        .into_iter()
+        .zip(code)
+        {
+            palette.syntax[class as usize] = rgb(hex);
+        }
+        palette
     };
-    vec![
-        Preset {
-            id: "feather",
-            name: "Feather",
-            dark: FEATHER_DARK,
-            light: FEATHER_LIGHT,
-        },
-        Preset {
-            id: "midnight",
-            name: "Midnight",
-            dark: MIDNIGHT.palette(),
-            light: FEATHER_LIGHT,
-        },
-        pair(
-            "catppuccin",
-            "Catppuccin",
-            CATPPUCCIN_MOCHA,
-            CATPPUCCIN_LATTE,
+    let (light, dark) = theme.map_or((None, None), |t| (t.light, t.dark));
+    Preset {
+        id: DEFAULT_THEME,
+        name: "Clay",
+        // Code colors: keyword, string, number, escape, function, type, tag.
+        dark: half(
+            dark,
+            FEATHER_DARK,
+            [
+                0xd97757, 0xa8b878, 0xd9a657, 0x7db5a8, 0xb0a4e8, 0x8ab4cf, 0xe0806a,
+            ],
         ),
-        pair("gruvbox", "Gruvbox", GRUVBOX_DARK, GRUVBOX_LIGHT),
-        pair("nord", "Nord", NORD_DARK, NORD_LIGHT),
-        pair("solarized", "Solarized", SOLARIZED_DARK, SOLARIZED_LIGHT),
-        pair("tokyo-night", "Tokyo Night", TOKYO_NIGHT, TOKYO_DAY),
-    ]
+        light: half(
+            light,
+            FEATHER_LIGHT,
+            [
+                0xb5522e, 0x5b7a2e, 0x946500, 0x1f7a6c, 0x6a4fc9, 0x2f6f98, 0xb03a2e,
+            ],
+        ),
+    }
+}
+
+/// The built-in themes. The first is the default.
+pub fn presets() -> &'static [Preset] {
+    static PRESETS: OnceLock<Vec<Preset>> = OnceLock::new();
+    PRESETS.get_or_init(|| {
+        let pair = |id, name, dark: Seed, light: Seed| Preset {
+            id,
+            name,
+            dark: dark.palette(),
+            light: light.palette(),
+        };
+        vec![
+            clay(),
+            Preset {
+                id: "feather",
+                name: "Feather",
+                dark: FEATHER_DARK,
+                light: FEATHER_LIGHT,
+            },
+            Preset {
+                id: "midnight",
+                name: "Midnight",
+                dark: MIDNIGHT.palette(),
+                light: FEATHER_LIGHT,
+            },
+            pair(
+                "catppuccin",
+                "Catppuccin",
+                CATPPUCCIN_MOCHA,
+                CATPPUCCIN_LATTE,
+            ),
+            pair("gruvbox", "Gruvbox", GRUVBOX_DARK, GRUVBOX_LIGHT),
+            pair("nord", "Nord", NORD_DARK, NORD_LIGHT),
+            pair("solarized", "Solarized", SOLARIZED_DARK, SOLARIZED_LIGHT),
+            pair("tokyo-night", "Tokyo Night", TOKYO_NIGHT, TOKYO_DAY),
+        ]
+    })
 }
 
 // ── Importing ──────────────────────────────────────────────────────────────
@@ -484,7 +549,10 @@ fn palette_from_variables(vars: &Variables) -> Option<Palette> {
         accent,
         // Status colors keep their meaning, whatever the theme's own hues are.
         green: base.green,
-        red: color(&["destructive"]).map_or(base.red, readable),
+        // Some themes make "destructive" black or white. Only a real color will do.
+        red: color(&["destructive"])
+            .filter(|c| saturation(*c) > 0.25)
+            .map_or(base.red, readable),
         yellow: base.yellow,
         blue: base.blue,
         orange: base.orange,

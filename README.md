@@ -16,9 +16,10 @@ A fast, minimal desktop app for browsing a repository and handling everyday git.
 - **Search**: text across the repository, find in the open file, and quick open
   by file name.
 - **Terminal**: tabbed terminals in the repository folder, inside the window.
-- **Themes**: seven built in, each light and dark, and any tweakcn or shadcn/ui
+- **Themes**: eight built in, each light and dark, and any tweakcn or shadcn/ui
   theme can be pasted in. Plus accent colour, font size, line wrap and indentation.
-- **Blame**: who last changed the current line, in the status bar.
+- **Blame**: who last changed the current line, beside the line and in the status
+  bar. It can be turned off in Settings.
 - **Updates**: Feather checks for new releases and can install them itself.
 
 Feather is written in Rust with [egui](https://github.com/emilk/egui). It ships as a
@@ -27,11 +28,33 @@ git work off the UI thread.
 
 ## Install
 
-Download the build for your computer from the
-[latest release](https://github.com/Nyaughh/feather/releases/latest) (on Windows,
-`feather-windows-x86_64-setup.exe` is the installer); the
-[website](https://feather.lh3k.dev/#install) has the steps for each system.
-Feather needs `git` on your `PATH`.
+**macOS** - paste this into Terminal:
+
+```sh
+curl -fsSL https://feather.lh3k.dev/install.sh | bash
+```
+
+It downloads the newest release, checks it against the published checksum and
+puts Feather in Applications, with no password and no settings changed. Feather
+isn't notarized by Apple, and macOS refuses to open such an app when a browser
+downloaded it; a copy fetched this way isn't held back. This is not
+notarization, and the rest of macOS's protections still apply. You can read
+[the script](site/install.sh) first.
+
+Or download `feather-macos-universal.zip` from the
+[latest release](https://github.com/Nyaughh/feather/releases/latest) and drag
+Feather into Applications. If macOS blocks it, open System Settings > Privacy &
+Security > Open Anyway.
+
+**Windows** - run `feather-windows-x86_64-setup.exe` from the
+[latest release](https://github.com/Nyaughh/feather/releases/latest).
+
+**Linux** - unpack `feather-linux-x86_64.tar.gz` from the
+[latest release](https://github.com/Nyaughh/feather/releases/latest) and run
+`./feather`.
+
+The [website](https://feather.lh3k.dev/#install) has the steps for each system.
+Feather needs `git` on your `PATH`, and keeps itself up to date after that.
 
 ## Building from source
 
@@ -77,7 +100,8 @@ The optimized binary is written to `target/release/feather`.
 | `theme.rs`    | The current colors, fonts and metrics.                               |
 | `themes.rs`   | The built-in themes, and importing one from tweakcn / shadcn CSS.    |
 | `terminal.rs` | Shells running in pseudo-terminals, and their screen state.          |
-| `svg.rs`      | SVG images, including README badges.                                 |
+| `images.rs`   | Finds and decodes every image shown, including README badges.        |
+| `markdown.rs` | Turns the HTML in a README into Markdown the viewer can show.        |
 | `settings.rs` | Everything the user can change, saved between runs.                  |
 | `update.rs`   | Checks GitHub for a newer release and installs it.                   |
 

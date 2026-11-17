@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0
+
+- **A new default look**: Clay, a warm paper-and-terracotta theme from tweakcn, is what Feather now starts with, in light and dark. If you were on the Feather theme you are moved to Clay once; Feather is still there in Settings.
+- **README images**: far more of them show up. GIF and WebP files (a GIF shows its first frame), HTML `<img>` tags at the size they ask for, paths from the top of the repository, addresses ending in `?raw=true`, and links to a picture's page on GitHub all work now. Pictures that live in the same repository on GitHub are read from your disk, so they also work in private repositories.
+- An image that really cannot be loaded shows a small "Image unavailable" note instead of a red warning icon.
+- **HTML in Markdown**: centered logos and headings, links, line breaks, `<details>`, `<kbd>` and other common tags are shown as what they mean rather than printed as tags.
+- **Blame beside the line**: who last changed the line your cursor is on, when, and the commit summary, written faintly after the end of that line as well as in the status bar. Turn it off under Settings > Git > Show blame.
+- **macOS**: install with one line in Terminal, `curl -fsSL https://feather.lh3k.dev/install.sh | bash`. It checks the download against the published checksum and puts Feather in Applications. A copy fetched this way is not held back the way a browser download is. This is not notarization, and the rest of macOS's protections still apply.
+
 ## 0.3.1
 
 - **Terminal on Windows**: the terminal stayed blank and ignored typing. Windows asks a new terminal where its cursor is and waits for the answer; Feather now replies, so the prompt appears and input works.
