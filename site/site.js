@@ -32,9 +32,16 @@ const heroMeta = document.getElementById('heroMeta');
 
 if (platform) {
   const { name, asset, card } = PLATFORMS[platform];
-  heroButton.href = latestUrl(asset);
-  heroButton.dataset.asset = asset;
-  document.getElementById('heroDownloadLabel').textContent = `Download for ${name}`;
+  if (platform === 'mac') {
+    // On a Mac the one-line installer is the way in: a zip downloaded in a
+    // browser is blocked by macOS until it is allowed in System Settings.
+    heroButton.href = `#${card}`;
+    document.getElementById('heroDownloadLabel').textContent = 'Install on macOS';
+  } else {
+    heroButton.href = latestUrl(asset);
+    heroButton.dataset.asset = asset;
+    document.getElementById('heroDownloadLabel').textContent = `Download for ${name}`;
+  }
   document.getElementById(card).classList.add('yours');
   // In the release card, only this computer's download stays highlighted.
   for (const link of document.querySelectorAll('.release-side .btn')) {
@@ -43,6 +50,24 @@ if (platform) {
 }
 if (platform === 'mac') {
   for (const key of document.querySelectorAll('kbd[data-mod]')) key.textContent = '⌘';
+}
+
+// ── Copy buttons ─────────────────────────────────────────────────────────────
+
+for (const button of document.querySelectorAll('button[data-copy]')) {
+  const label = button.textContent;
+  button.addEventListener('click', async () => {
+    const source = document.getElementById(button.dataset.copy);
+    try {
+      await navigator.clipboard.writeText(source.textContent.trim());
+      button.textContent = 'Copied';
+    } catch {
+      // No clipboard access: select the text so Cmd+C does it.
+      getSelection().selectAllChildren(source);
+      button.textContent = 'Selected, now copy it';
+    }
+    setTimeout(() => { button.textContent = label; }, 1800);
+  });
 }
 
 // ── Releases ─────────────────────────────────────────────────────────────────

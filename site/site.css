@@ -147,7 +147,8 @@ main > section + section { margin-top: 128px; }
 .install ol { margin: 16px 0 22px; padding-left: 1.25em; font-size: .9375rem; flex: 1; }
 .install li + li { margin-top: 8px; }
 .install li::marker { color: var(--text-3); }
-.install .btn { align-self: flex-start; }
+.install .btn { align-self: flex-start; cursor: pointer; }
+.install .cmd { display: block; margin-top: 8px; padding: 9px 10px; font-size: .75rem; background: var(--shell); border: 1px solid var(--border-strong); border-radius: 8px; user-select: all; }
 .install .alt { margin-top: 12px; font-size: .8125rem; color: var(--text-3); }
 .install .alt a { color: var(--text-2); }
 

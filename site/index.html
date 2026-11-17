@@ -94,7 +94,7 @@
         <article>
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><circle cx="8.5" cy="10" r="1"/><circle cx="12" cy="7.5" r="1"/><circle cx="15.5" cy="10" r="1"/><path d="M12 20.5c-1.5 0-2-1-2-2s1-1.5 1-2.500"/></svg>
           <h3>Themes for the whole app</h3>
-          <p>Seven built-in themes, each with a light and a dark side. Or paste one from tweakcn or any shadcn/ui theme, and everything from the sidebar to the terminal follows it.</p>
+          <p>Eight built-in themes, each with a light and a dark side. Or paste one from tweakcn or any shadcn/ui theme, and everything from the sidebar to the terminal follows it.</p>
         </article>
         <article>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 3 5 13.5h6L10 21l9-11h-6z"/></svg>
@@ -151,11 +151,14 @@
           <h3>macOS</h3>
           <p class="req">macOS 11 or newer, Apple silicon and Intel</p>
           <ol>
-            <li>Download and unzip, then drag <b>Feather</b> into Applications.</li>
-            <li>Open it. macOS will refuse the first time, because the app isn't notarized by Apple yet.</li>
-            <li>Go to <b>System Settings › Privacy &amp; Security</b> and choose <b>Open Anyway</b>.</li>
+            <li>Open <b>Terminal</b> and paste this line:
+              <code class="cmd" id="macCommand">curl -fsSL https://feather.lh3k.dev/install.sh | bash</code>
+            </li>
+            <li>It downloads the newest release, checks it against the published checksum, puts Feather in Applications and opens it. It asks for no password and changes no setting. You can <a href="/install.sh">read the script</a> first.</li>
+            <li>Why Terminal: Apple hasn't notarized Feather, and macOS refuses to open such an app when a browser downloaded it. A copy fetched this way isn't held back. This is not notarization, and the rest of macOS's protections still apply.</li>
           </ol>
-          <a class="btn" data-asset="feather-macos-universal.zip" href="https://github.com/Nyaughh/feather/releases/latest/download/feather-macos-universal.zip">Download for macOS <span class="size"></span></a>
+          <button class="btn" type="button" data-copy="macCommand">Copy the command</button>
+          <p class="alt">Or <a data-asset="feather-macos-universal.zip" href="https://github.com/Nyaughh/feather/releases/latest/download/feather-macos-universal.zip">download the zip</a> and drag Feather into Applications. If macOS blocks it, open System Settings &gt; Privacy &amp; Security &gt; Open Anyway.</p>
         </article>
         <article id="os-windows">
           <h3>Windows</h3>
