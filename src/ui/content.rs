@@ -484,6 +484,7 @@ fn find_bar(ui: &mut Ui, buffer: &EditBuffer, slot: &mut Option<FindBar>, jump: 
         .show(ui, |ui| {
             let field = ui.add(
                 TextEdit::singleline(&mut find.query)
+                    .align(egui::Align2::LEFT_CENTER)
                     .id(id)
                     .hint_text("Find in file")
                     .desired_width(240.0)

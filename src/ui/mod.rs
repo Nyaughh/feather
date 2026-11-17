@@ -467,6 +467,7 @@ fn theme_import_modal(ctx: &egui::Context, app: &mut App) {
             field(ui, &mut |ui| {
                 ui.add(
                     egui::TextEdit::singleline(&mut draft.name)
+                        .align(egui::Align2::LEFT_CENTER)
                         .hint_text("Name, for example Sunset")
                         .desired_width(f32::INFINITY)
                         .frame(Frame::new()),
