@@ -19,13 +19,54 @@ enum Message {
     Exited,
 }
 
+/// Collects the answers to questions the running program asks the terminal.
+///
+/// Programs can ask where the cursor is or what kind of terminal this is, and
+/// then wait for the reply. Windows does exactly that when a console starts:
+/// until it is told the cursor position it shows nothing and accepts nothing.
+#[derive(Default)]
+struct Replies {
+    pending: Vec<u8>,
+}
+
+impl vt100::Callbacks for Replies {
+    fn unhandled_csi(
+        &mut self,
+        screen: &mut vt100::Screen,
+        prefix: Option<u8>,
+        _: Option<u8>,
+        params: &[&[u16]],
+        action: char,
+    ) {
+        let first = params.first().and_then(|p| p.first()).copied().unwrap_or(0);
+        let reply = match (prefix, action, first) {
+            // "Report cursor position" (and its DEC variant).
+            (None, 'n', 6) => {
+                let (row, col) = screen.cursor_position();
+                format!("\x1b[{};{}R", row + 1, col + 1)
+            }
+            (Some(b'?'), 'n', 6) => {
+                let (row, col) = screen.cursor_position();
+                format!("\x1b[?{};{}R", row + 1, col + 1)
+            }
+            // "Are you there?"
+            (None, 'n', 5) => "\x1b[0n".to_owned(),
+            // "What are you?": a VT100 with the advanced video option.
+            (None, 'c', 0) => "\x1b[?1;2c".to_owned(),
+            (Some(b'>'), 'c', 0) => "\x1b[>0;10;1c".to_owned(),
+            _ => return,
+        };
+        self.pending.extend_from_slice(reply.as_bytes());
+    }
+}
+
 /// A cell position on the visible screen: (row, column).
 pub type Cell = (u16, u16);
 
 pub struct Terminal {
     /// Short name for its tab, e.g. `bash`.
     pub title: String,
-    parser: vt100::Parser,
+    parser: vt100::Parser<Replies>,
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
@@ -128,7 +169,12 @@ impl Terminal {
 
         Ok(Self {
             title,
-            parser: vt100::Parser::new(nz(rows), nz(cols), SCROLLBACK),
+            parser: vt100::Parser::new_with_callbacks(
+                nz(rows),
+                nz(cols),
+                SCROLLBACK,
+                Replies::default(),
+            ),
             writer,
             master: pair.master,
             killer,
@@ -144,8 +190,13 @@ impl Terminal {
         while let Ok(message) = self.messages.try_recv() {
             match message {
                 Message::Output(bytes) => {
-                    // New output while scrolled back would otherwise shift the view.
                     self.parser.process(&bytes);
+                    // Answer anything the program asked while printing that.
+                    let replies = std::mem::take(&mut self.parser.callbacks_mut().pending);
+                    if !replies.is_empty() {
+                        let _ = self.writer.write_all(&replies);
+                        let _ = self.writer.flush();
+                    }
                 }
                 Message::Exited => self.exited = true,
             }
@@ -387,6 +438,26 @@ mod tests {
 
         terminal.send(b"exit\r");
         assert!(wait_for(&mut terminal, |t| t.exited));
+    }
+
+    #[test]
+    fn answers_when_a_program_asks_where_the_cursor_is() {
+        // Windows asks this before it will show a prompt; here a script does.
+        let ctx = egui::Context::default();
+        let mut terminal =
+            Terminal::spawn(&std::env::temp_dir(), "/bin/bash --norc --noprofile", &ctx)
+                .expect("spawn bash");
+        terminal.send(
+            b"clear; printf 'abc\\033[6n'; IFS='[;' read -rs -d R _ row col; echo \" at=$row,$col\"\r",
+        );
+        assert!(
+            wait_for(&mut terminal, |t| t
+                .screen()
+                .contents()
+                .contains("abc at=1,4")),
+            "screen was: {:?}",
+            terminal.screen().contents()
+        );
     }
 
     #[test]

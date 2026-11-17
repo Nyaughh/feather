@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1
+
+- **Terminal on Windows**: the terminal stayed blank and ignored typing. Windows asks a new terminal where its cursor is and waits for the answer; Feather now replies, so the prompt appears and input works.
+- The search box grows as you type a longer query, and text now sits in the middle of every single-line field.
+- Theme tiles in Settings no longer have a strip down their left edge.
+
 ## 0.3.0
 
 - **Terminal**: open terminals inside the window with Ctrl+` (or the button in the title bar). They start in the repository folder, and you can keep several in tabs. The shell can be changed in Settings.

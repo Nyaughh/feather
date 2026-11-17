@@ -186,6 +186,7 @@ fn body(ui: &mut Ui, settings: &mut Settings, updater: &Updater, cmds: &mut Vec<
                 .show(ui, |ui| {
                     ui.add(
                         egui::TextEdit::singleline(&mut settings.shell)
+                            .align(egui::Align2::LEFT_CENTER)
                             .hint_text(if cfg!(windows) {
                                 "powershell.exe"
                             } else {
@@ -457,11 +458,8 @@ fn theme_grid(ui: &mut Ui, settings: &mut Settings, cmds: &mut Vec<Cmd>) {
                     outline,
                     StrokeKind::Inside,
                 );
-                // A strip of the theme's sidebar color, as in the real window.
-                let strip = Rect::from_min_size(rect.min, vec2(10.0, rect.height())).shrink(2.0);
-                painter.rect_filled(strip, CornerRadius::same(3), palette.bg_shell);
                 painter.text(
-                    pos2(rect.left() + 20.0, rect.center().y),
+                    pos2(rect.left() + 14.0, rect.center().y),
                     egui::Align2::LEFT_CENTER,
                     name,
                     theme::medium_font(13.0),

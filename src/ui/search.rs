@@ -82,20 +82,31 @@ pub fn show(ui: &mut Ui, repo: &mut Repo, cmds: &mut Vec<Cmd>) {
                     },
                 ))
                 .corner_radius(CornerRadius::same(theme::radius()))
-                .inner_margin(Margin::symmetric(8, 5))
+                .inner_margin(Margin::symmetric(8, 6))
                 .show(ui, |ui| {
+                    // The usual minimum control height would leave a one-line
+                    // query sitting at the top of a taller box.
+                    ui.spacing_mut().interact_size.y = 0.0;
+                    // A text area that wraps and grows as the query gets longer.
+                    // Enter searches rather than starting a new line.
                     let response = ui.add(
-                        TextEdit::singleline(&mut search.query)
+                        TextEdit::multiline(&mut search.query)
                             .id(id)
                             .hint_text("Search in files")
+                            .desired_rows(1)
                             .desired_width(f32::INFINITY)
+                            .return_key(None)
                             .frame(Frame::new()),
                     );
                     if std::mem::take(&mut search.focus) {
                         response.request_focus();
                     }
+                    // Pasted text can bring line breaks; a search is one line.
+                    if search.query.contains(['\n', '\r']) {
+                        search.query = search.query.replace(['\n', '\r'], " ");
+                    }
                     changed |= response.changed();
-                    submit |= response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                    submit |= response.has_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                 });
             ui.horizontal(|ui| {
                 let options = &mut search.options;
@@ -419,6 +430,7 @@ pub fn quick_open(ctx: &egui::Context, repo: &mut Repo, cmds: &mut Vec<Cmd>) {
                 .show(ui, |ui| {
                     let field = ui.add(
                         TextEdit::singleline(&mut state.query)
+                            .align(egui::Align2::LEFT_CENTER)
                             .hint_text("Go to file…")
                             .desired_width(f32::INFINITY)
                             .frame(Frame::new()),

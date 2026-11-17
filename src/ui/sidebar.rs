@@ -833,6 +833,7 @@ fn branch_picker(ui: &mut Ui, rect: Rect, repo: &mut Repo, cmds: &mut Vec<Cmd>) 
                 .show(ui, |ui| {
                     ui.add(
                         TextEdit::singleline(&mut repo.branch_filter)
+                            .align(egui::Align2::LEFT_CENTER)
                             .hint_text("Switch or create branch…")
                             .desired_width(f32::INFINITY)
                             .frame(Frame::new()),
