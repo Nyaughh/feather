@@ -5,6 +5,7 @@
 //! Every call here blocks, so apart from the one-off [`find_root`] when a
 //! repository is opened they are only ever made from background threads.
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -445,6 +446,153 @@ pub fn last_commit_message(root: &Path) -> Option<String> {
     let message = run_text(root, &["log", "-1", "--format=%B"]).ok()?;
     let message = message.trim();
     (!message.is_empty()).then(|| message.to_owned())
+}
+
+// ── History ────────────────────────────────────────────────────────────────
+
+/// How many commits the history shows.
+pub const LOG_LIMIT: usize = 400;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Commit {
+    pub hash: String,
+    pub short: String,
+    pub parents: Vec<String>,
+    pub author: String,
+    /// Seconds since the Unix epoch.
+    pub time: i64,
+    pub subject: String,
+    /// Branches and tags pointing here, as `main`, `origin/main`, `tag: v1.0`.
+    pub refs: Vec<String>,
+    /// On the remote branch but not yet in this one: what a pull would bring.
+    pub incoming: bool,
+}
+
+/// The newest commits on this branch and on the branch it tracks, newest
+/// first, children always before their parents.
+pub fn log(root: &Path) -> Result<Vec<Commit>> {
+    const FORMAT: &str = "--format=%H%x1f%h%x1f%P%x1f%an%x1f%at%x1f%D%x1f%s%x1e";
+    let limit = format!("-n{LOG_LIMIT}");
+    let upstream = run(root, &["rev-parse", "--verify", "-q", "@{upstream}"]).is_ok();
+    let mut args = vec!["log", "--topo-order", &limit, FORMAT, "HEAD"];
+    if upstream {
+        args.push("@{upstream}");
+    }
+    args.push("--");
+    let out = run_text(root, &args)?;
+    let mut commits = parse_log(&out);
+    if upstream && let Ok(head) = run_text(root, &["rev-parse", "HEAD"]) {
+        mark_incoming(&mut commits, head.trim());
+    }
+    Ok(commits)
+}
+
+fn parse_log(out: &str) -> Vec<Commit> {
+    out.split('\u{1e}')
+        .filter_map(|record| {
+            let mut f = record.trim_start_matches(['\n', '\r']).split('\u{1f}');
+            let hash = f.next()?.to_owned();
+            if hash.is_empty() {
+                return None;
+            }
+            let short = f.next()?.to_owned();
+            let parents = f.next()?.split_whitespace().map(str::to_owned).collect();
+            let author = f.next()?.to_owned();
+            let time = f.next()?.parse().unwrap_or(0);
+            let mut refs: Vec<String> = f
+                .next()?
+                .split(", ")
+                .map(|r| r.strip_prefix("HEAD -> ").unwrap_or(r))
+                .filter(|r| !r.is_empty() && *r != "HEAD" && !r.ends_with("/HEAD"))
+                .map(str::to_owned)
+                .collect();
+            // Local branches first, then tags, then remote branches.
+            refs.sort_by_key(|r| {
+                if r.starts_with("tag: ") {
+                    1
+                } else if r.contains('/') {
+                    2
+                } else {
+                    0
+                }
+            });
+            let subject = f.next().unwrap_or("").trim_end().to_owned();
+            Some(Commit {
+                hash,
+                short,
+                parents,
+                author,
+                time,
+                subject,
+                refs,
+                incoming: false,
+            })
+        })
+        .collect()
+}
+
+/// Marks the commits that HEAD cannot reach, following parents from it.
+fn mark_incoming(commits: &mut [Commit], head: &str) {
+    let index: HashMap<&str, usize> = commits
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.hash.as_str(), i))
+        .collect();
+    let Some(&start) = index.get(head) else {
+        return;
+    };
+    let mut reachable = vec![false; commits.len()];
+    let mut stack = vec![start];
+    while let Some(i) = stack.pop() {
+        if std::mem::replace(&mut reachable[i], true) {
+            continue;
+        }
+        for parent in &commits[i].parents {
+            if let Some(&p) = index.get(parent.as_str()) {
+                stack.push(p);
+            }
+        }
+    }
+    for (commit, reachable) in commits.iter_mut().zip(reachable) {
+        commit.incoming = !reachable;
+    }
+}
+
+/// Changes whenever the history shown would: every branch and tag and the
+/// commit it points at, and HEAD.
+pub fn history_key(root: &Path) -> Option<String> {
+    let refs = run_text(
+        root,
+        &[
+            "for-each-ref",
+            "--format=%(objectname) %(refname)",
+            "refs/heads",
+            "refs/remotes",
+            "refs/tags",
+        ],
+    )
+    .ok()?;
+    let head = run_text(root, &["rev-parse", "-q", "--verify", "HEAD"]).unwrap_or_default();
+    Some(format!("{head}{refs}"))
+}
+
+/// A commit's full message and its changes as one patch.
+pub fn show_commit(root: &Path, hash: &str) -> Result<(String, String)> {
+    let out = run_text(
+        root,
+        &[
+            "show",
+            "--no-color",
+            "-M",
+            // A merge shows what it brought into the branch.
+            "--diff-merges=first-parent",
+            "--format=%B%x00",
+            "--end-of-options",
+            hash,
+        ],
+    )?;
+    let (message, patch) = out.split_once('\0').unwrap_or((&out, ""));
+    Ok((message.trim().to_owned(), patch.to_owned()))
 }
 
 // ── Stashes ────────────────────────────────────────────────────────────────
@@ -1082,6 +1230,48 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
         undo_commit(root).unwrap();
         assert_eq!(repo.status().head, None);
         assert_eq!(paths(&repo.status().staged), ["a.txt", "b.txt", "c.txt"]);
+    }
+
+    #[test]
+    fn reads_history_with_what_a_pull_would_bring() {
+        let remote = TempRepo::new("log-remote");
+        remote.write("a.txt", "one\n");
+        stage_all(&remote.0).unwrap();
+        commit(&remote.0, "First").unwrap();
+
+        let repo = TempRepo::new("log-local");
+        let root = &repo.0;
+        // Nothing to show before the first commit.
+        assert!(log(root).is_err() || log(root).unwrap().is_empty());
+        repo.git(&["pull", "-q", remote.0.to_str().unwrap(), "main"]);
+        repo.git(&["remote", "add", "origin", remote.0.to_str().unwrap()]);
+        repo.git(&["fetch", "-q", "origin"]);
+        repo.git(&["branch", "-q", "--set-upstream-to", "origin/main"]);
+        repo.write("b.txt", "local\n");
+        stage_all(root).unwrap();
+        commit(root, "Local work").unwrap();
+        remote.write("c.txt", "remote\n");
+        stage_all(&remote.0).unwrap();
+        commit(&remote.0, "Someone else's work").unwrap();
+        repo.git(&["fetch", "-q", "origin"]);
+
+        let commits = log(root).unwrap();
+        let subjects: Vec<_> = commits.iter().map(|c| c.subject.as_str()).collect();
+        assert_eq!(subjects.len(), 3);
+        assert_eq!(subjects[2], "First");
+        let by = |s: &str| commits.iter().find(|c| c.subject == s).unwrap();
+        assert!(by("Someone else's work").incoming);
+        assert!(!by("Local work").incoming);
+        assert!(!by("First").incoming);
+        assert_eq!(by("Local work").refs, ["main"]);
+        assert_eq!(by("Someone else's work").refs, ["origin/main"]);
+        assert_eq!(by("Local work").parents, [by("First").hash.clone()]);
+        assert_eq!(by("First").author, "Test");
+        assert!(by("First").time > 0);
+
+        let (message, patch) = show_commit(root, &by("Local work").hash).unwrap();
+        assert_eq!(message, "Local work");
+        assert!(patch.contains("+++ b/b.txt"), "{patch}");
     }
 
     #[test]

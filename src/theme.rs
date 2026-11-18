@@ -277,6 +277,7 @@ pub fn code_font() -> FontId {
 /// Phosphor icon codepoints (regular weight).
 pub mod icon {
     pub const CARET_RIGHT: &str = "\u{E13A}";
+    pub const CARET_LEFT: &str = "\u{E138}";
     pub const CARET_DOWN: &str = "\u{E136}";
     pub const CARET_UP_DOWN: &str = "\u{E140}";
     pub const FOLDER: &str = "\u{E24A}";

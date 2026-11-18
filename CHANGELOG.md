@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0
+
+- **Commit history**: the Git tab now lists recent commits under your changes, with the branch graph drawn beside them: a line per branch, merges where lines join, and your current commit ringed. Commits on the remote that you have not pulled yet show hollow and dimmed, and the heading counts them. Click a commit to see its message and every file it changed. The list can be folded away or resized by dragging its top edge.
+- **Stashes moved into the "..." menu**: choose **Stashes** there to see them, then pick one to apply, apply and keep, or delete. They no longer fill the Git tab.
+- The "..." button now has the same shape as the Commit button beside it.
+
 ## 0.5.0
 
 - **Stash**: the new "..." button beside Commit has **Stash changes**, which sets every change aside, new files included. Stashes are listed under the changes; click one to apply and remove it, apply and keep it, or delete it.

@@ -9,7 +9,8 @@ A fast, minimal desktop app for browsing a repository and handling everyday git.
 - **Files**: a lazy file tree with git status markers; a syntax-highlighted
   editor, rendered Markdown, and image/SVG previews.
 - **Git**: staged and unstaged changes, per-file diffs, stage / unstage / discard,
-  commit, amend and undo the last commit, stash, and pull / push / fetch.
+  commit, amend and undo the last commit, stash, and pull / push / fetch. Recent
+  history with a branch graph; click a commit to see what it changed.
 - **Branches and worktrees**: side by side at the bottom-left; click either to
   switch, or type a new name in the branch picker to create one. Branches that
   only exist on the remote are listed too, and Feather fetches every few minutes.
@@ -94,6 +95,7 @@ The optimized binary is written to `target/release/feather`.
 | `worker.rs`   | Background threads; results come back to the UI as events.           |
 | `document.rs` | Loads files and syntax-highlights them.                              |
 | `diff.rs`     | Parses unified diffs into rows.                                      |
+| `graph.rs`    | Lays out the lines of the commit graph.                              |
 | `tree.rs`     | The lazily-read file tree.                                           |
 | `app.rs`      | Application state; applies UI commands and worker events.            |
 | `ui/`         | Drawing: title bar, sidebar, editor and diffs, settings, widgets.    |

@@ -15,7 +15,7 @@ use super::widgets::{
     ButtonKind, button, elided, empty_state, icon_button, paint_galley, segmented,
 };
 use super::{virtual_rows, virtual_rows_from};
-use crate::app::{Cmd, DiffView, EditBuffer, FileView, FindBar, Jump, Repo, View};
+use crate::app::{Cmd, CommitView, DiffView, EditBuffer, FileView, FindBar, Jump, Repo, View};
 use crate::diff::{Diff, DiffLine, LineKind};
 use crate::document::{self, Body, Highlights, LoadedFile, Preview, Span, TextDoc};
 use crate::git::{BlameLine, ChangeKind};
@@ -62,7 +62,242 @@ pub fn show(
             diff_header(ui, view, idle, cmds);
             diff_body(ui, view);
         }
+        View::Commit(view) => commit_view(ui, view),
     }
+}
+
+// ── Commit ─────────────────────────────────────────────────────────────────
+
+/// One row of a commit's changes: a file's name, or a line of its diff.
+#[derive(Clone, Copy)]
+enum CommitRow {
+    File(usize),
+    Line(usize, usize),
+    Note(&'static str),
+    Gap,
+}
+
+fn commit_view(ui: &mut Ui, view: &CommitView) {
+    let commit = &view.commit;
+    let files = match &view.detail {
+        Some(Ok(detail)) => Some(detail),
+        _ => None,
+    };
+
+    // Header: the short hash, the subject, and totals.
+    let rect = header_rect(ui);
+    let totals = files.map(|d| {
+        d.files.iter().fold((0, 0), |(a, r), f| {
+            (a + f.diff.additions, r + f.diff.deletions)
+        })
+    });
+    let controls_left = header_controls(ui, rect, |ui| {
+        if button(ui, ButtonKind::Secondary, "Copy hash", None, true).clicked() {
+            ui.ctx().copy_text(commit.hash.clone());
+        }
+        if let Some((add, del)) = totals {
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(format!("−{del}"))
+                    .font(theme::medium_font(12.0))
+                    .color(theme::red()),
+            );
+            ui.label(
+                egui::RichText::new(format!("+{add}"))
+                    .font(theme::medium_font(12.0))
+                    .color(theme::green()),
+            );
+        }
+    });
+    let mid = rect.center().y;
+    let mut x = rect.left() + 16.0;
+    let hash = ui.painter().layout_no_wrap(
+        commit.short.clone(),
+        egui::FontId::new(12.0, egui::FontFamily::Monospace),
+        theme::text_secondary(),
+    );
+    let pill = Rect::from_min_size(pos2(x, mid - 10.0), vec2(hash.size().x + 14.0, 20.0));
+    ui.painter().rect_stroke(
+        pill,
+        CornerRadius::same(10),
+        Stroke::new(1.0, theme::border_strong()),
+        egui::StrokeKind::Inside,
+    );
+    paint_galley(ui, pill.left() + 7.0, mid, hash);
+    x = pill.right() + 10.0;
+    let subject = elided(
+        ui,
+        &commit.subject,
+        theme::medium_font(13.0),
+        theme::text(),
+        controls_left - 16.0 - x,
+    );
+    paint_galley(ui, x, mid, subject);
+
+    // Who and when, and the rest of the message.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    let body = files
+        .map(|d| {
+            d.message
+                .split_once('\n')
+                .map_or("", |(_, rest)| rest.trim())
+        })
+        .unwrap_or("");
+    egui::Panel::top("commit_meta")
+        .frame(
+            Frame::new()
+                .inner_margin(Margin::symmetric(16, 10))
+                .stroke(Stroke::NONE),
+        )
+        .show_separator_line(false)
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing = vec2(0.0, 6.0);
+            let mut who = format!("{} committed {}", commit.author, time_ago(commit.time, now));
+            if !commit.refs.is_empty() {
+                who.push_str(" · ");
+                who.push_str(&commit.refs.join(", "));
+            }
+            if commit.incoming {
+                who.push_str(" · not pulled yet");
+            }
+            ui.add(Label::new(
+                egui::RichText::new(who)
+                    .font(theme::ui_font(12.5))
+                    .color(theme::text_secondary()),
+            ));
+            if !body.is_empty() {
+                ScrollArea::vertical()
+                    .id_salt("commit_body")
+                    .max_height(140.0)
+                    .show(ui, |ui| {
+                        ui.add(
+                            Label::new(
+                                egui::RichText::new(body)
+                                    .font(theme::ui_font(13.0))
+                                    .color(theme::text()),
+                            )
+                            .wrap()
+                            .selectable(true),
+                        );
+                    });
+            }
+        });
+    let line = ui.max_rect();
+    ui.painter().hline(
+        line.x_range(),
+        line.top() - 0.5,
+        Stroke::new(1.0, theme::border()),
+    );
+
+    let detail = match &view.detail {
+        None => return,
+        Some(Err(error)) => {
+            empty_state(ui, icon::WARNING, "Couldn't load this commit", Some(error));
+            return;
+        }
+        Some(Ok(detail)) => detail,
+    };
+    if detail.files.is_empty() {
+        empty_state(
+            ui,
+            icon::CHECK,
+            "No changes",
+            Some("This commit changes no files."),
+        );
+        return;
+    }
+
+    let mut rows = Vec::new();
+    for (f, file) in detail.files.iter().enumerate() {
+        if f > 0 {
+            rows.push(CommitRow::Gap);
+        }
+        rows.push(CommitRow::File(f));
+        if file.diff.binary {
+            rows.push(CommitRow::Note("Binary file"));
+        } else if file.diff.is_empty() {
+            rows.push(CommitRow::Note("Renamed, or its mode changed"));
+        } else {
+            rows.extend((0..file.diff.lines.len()).map(|l| CommitRow::Line(f, l)));
+        }
+    }
+
+    let font = theme::code_font();
+    let char_w = char_width(ui, &font);
+    let last_no = detail
+        .files
+        .iter()
+        .flat_map(|f| f.diff.lines.iter().filter_map(|l| l.new_no.or(l.old_no)))
+        .max()
+        .unwrap_or(1);
+    let digits = last_no.to_string().len().max(2) as f32;
+    let number_col = digits * char_w + 14.0;
+    let gutter = 10.0 + number_col * 2.0 + char_w + 16.0;
+    let widest = detail
+        .files
+        .iter()
+        .map(|f| f.diff.max_chars)
+        .max()
+        .unwrap_or(0);
+    let content_width = gutter + widest as f32 * char_w + 32.0;
+
+    virtual_rows(
+        ui,
+        Id::unique(("commit", &commit.hash)),
+        true,
+        theme::code_row_height(),
+        rows.len(),
+        content_width,
+        6.0,
+        |ui, i, rect| match rows[i] {
+            CommitRow::Gap => {}
+            CommitRow::File(f) => {
+                let file = &detail.files[f];
+                let visible = Rect::from_x_y_ranges(ui.clip_rect().x_range(), rect.y_range());
+                ui.painter()
+                    .rect_filled(visible, CornerRadius::ZERO, theme::overlay(10));
+                let mid = rect.center().y;
+                let mut right = visible.right() - 14.0;
+                if !file.diff.binary {
+                    // Drawn right to left, so they read "+3 −1" like the header.
+                    for (text, color) in [
+                        (format!("−{}", file.diff.deletions), theme::red()),
+                        (format!("+{}", file.diff.additions), theme::green()),
+                    ] {
+                        let g = ui
+                            .painter()
+                            .layout_no_wrap(text, theme::medium_font(11.5), color);
+                        right -= g.size().x;
+                        paint_galley(ui, right, mid, g);
+                        right -= 8.0;
+                    }
+                }
+                let x = visible.left() + 14.0;
+                let path = breadcrumb(ui, &file.path, right - 8.0 - x);
+                paint_galley(ui, x, mid, path);
+            }
+            CommitRow::Note(text) => {
+                ui.painter().text(
+                    pos2(ui.clip_rect().left() + 14.0, rect.center().y),
+                    Align2::LEFT_CENTER,
+                    text,
+                    theme::ui_font(12.0),
+                    theme::text_muted(),
+                );
+            }
+            CommitRow::Line(f, l) => diff_row(
+                ui,
+                rect,
+                &detail.files[f].diff.lines[l],
+                &font,
+                char_w,
+                number_col,
+                gutter,
+            ),
+        },
+    );
 }
 
 // ── Header ─────────────────────────────────────────────────────────────────

@@ -170,14 +170,15 @@ fn bar(
 
     // Centre: what is open.
     if let Some(repo) = repo {
+        let file_name = |path: &str| path.rsplit('/').next().unwrap_or(path).to_owned();
         let detail = match &repo.view {
-            View::File(view) => Some((view.rel.as_str(), view.is_dirty())),
-            View::Diff(view) => Some((view.change.path.as_str(), false)),
+            View::File(view) => Some((file_name(&view.rel), view.is_dirty())),
+            View::Diff(view) => Some((file_name(&view.change.path), false)),
+            View::Commit(view) => Some((view.commit.subject.clone(), false)),
             View::Empty => None,
         };
         let mut title = repo.name.clone();
-        if let Some((path, dirty)) = detail {
-            let name = path.rsplit('/').next().unwrap_or(path);
+        if let Some((name, dirty)) = detail {
             title = format!("{name}{} - {title}", if dirty { " •" } else { "" });
         }
         // Centred in the window when there is room, otherwise between the buttons.

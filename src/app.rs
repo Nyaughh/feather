@@ -11,14 +11,14 @@ use std::time::Duration;
 use crate::diff::Diff;
 use crate::document::{self, Body, Highlights, LoadedFile, Preview, Span, TextDoc};
 use crate::git::{
-    self, BlameLine, Branch, Change, ChangeKind, SearchOptions, SearchResults, Stash, Status,
-    Worktree,
+    self, BlameLine, Branch, Change, ChangeKind, Commit, SearchOptions, SearchResults, Stash,
+    Status, Worktree,
 };
 use crate::settings::Settings;
 use crate::terminal::Terminals;
 use crate::tree::Tree;
 use crate::update::{self, Updater};
-use crate::worker::{Action, Event, Watch, Worker};
+use crate::worker::{Action, CommitDetail, Event, Watch, Worker};
 use crate::{theme, ui};
 
 const SETTINGS_KEY: &str = "feather";
@@ -62,6 +62,9 @@ pub enum Cmd {
     SelectTerminal(usize),
     AskDiscardAll,
     AskDropStash(Stash),
+    /// Show a commit from the history.
+    OpenCommit(String),
+    ToggleHistory,
     /// Fold staged changes into the last commit, using the commit box's
     /// message if it has one.
     Amend,
@@ -85,7 +88,11 @@ impl Cmd {
     fn leaves_file(&self, current: Option<&str>) -> bool {
         match self {
             Self::OpenFile(rel) | Self::OpenAt { rel, .. } => current != Some(rel.as_str()),
-            Self::OpenRepo(_) | Self::OpenDiff { .. } | Self::Quit | Self::RestartToUpdate => true,
+            Self::OpenRepo(_)
+            | Self::OpenDiff { .. }
+            | Self::OpenCommit(_)
+            | Self::Quit
+            | Self::RestartToUpdate => true,
             // These rewrite files on disk, so unsaved edits are settled first.
             Self::Act(Action::Stash | Action::StashApply(_) | Action::StashPop(_)) => true,
             _ => false,
@@ -264,12 +271,20 @@ pub struct DiffView {
     pub diff: Option<Result<Diff, String>>,
 }
 
+/// One commit from the history, and what it changed.
+pub struct CommitView {
+    pub commit: Commit,
+    token: u64,
+    pub detail: Option<Result<CommitDetail, String>>,
+}
+
 // There is only ever one of these, so the size difference costs nothing.
 #[allow(clippy::large_enum_variant)]
 pub enum View {
     Empty,
     File(FileView),
     Diff(DiffView),
+    Commit(CommitView),
 }
 
 /// Per-path git state used to annotate the file tree.
@@ -340,6 +355,11 @@ pub struct Repo {
     pub branches: Vec<Branch>,
     pub worktrees: Vec<Worktree>,
     pub stashes: Vec<Stash>,
+    /// Recent history, newest first, and the lines of its graph.
+    pub commits: Vec<Commit>,
+    pub graph: Vec<crate::graph::Row>,
+    /// Whether the history list under the changes is expanded.
+    pub history_open: bool,
     /// The message of a commit being undone, to put back in the commit box.
     undone_message: Option<String>,
     /// The stash waiting on "delete it?".
@@ -382,6 +402,9 @@ impl Repo {
             branches: Vec::new(),
             worktrees: Vec::new(),
             stashes: Vec::new(),
+            commits: Vec::new(),
+            graph: Vec::new(),
+            history_open: true,
             undone_message: None,
             confirm_drop_stash: None,
             tab: Tab::Files,
@@ -476,6 +499,19 @@ impl Repo {
             staged,
             token,
             diff: None,
+        });
+    }
+
+    fn open_commit(&mut self, hash: &str) {
+        let Some(commit) = self.commits.iter().find(|c| c.hash == hash).cloned() else {
+            return;
+        };
+        let token = self.worker.commit(commit.hash.clone());
+        self.worker.watch(Watch::Nothing);
+        self.view = View::Commit(CommitView {
+            commit,
+            token,
+            detail: None,
         });
     }
 
@@ -638,6 +674,24 @@ impl Repo {
                 self.branches = refs.branches;
                 self.worktrees = refs.worktrees;
                 self.stashes = refs.stashes;
+                if self.commits != refs.commits {
+                    self.graph = crate::graph::layout(&refs.commits);
+                    self.commits = refs.commits;
+                    // The open commit may have been amended away or pulled in.
+                    if let View::Commit(view) = &mut self.view
+                        && let Some(fresh) =
+                            self.commits.iter().find(|c| c.hash == view.commit.hash)
+                    {
+                        view.commit = fresh.clone();
+                    }
+                }
+            }
+            Event::Commit { token, result } => {
+                if let View::Commit(view) = &mut self.view
+                    && view.token == token
+                {
+                    view.detail = Some(result);
+                }
             }
             Event::Diff { token, result } => {
                 if let View::Diff(view) = &mut self.view
@@ -1155,6 +1209,8 @@ impl App {
             }
             (Cmd::AskDiscardAll, Some(repo)) => repo.confirm_discard_all = true,
             (Cmd::AskDropStash(stash), Some(repo)) => repo.confirm_drop_stash = Some(stash),
+            (Cmd::OpenCommit(hash), Some(repo)) => repo.open_commit(&hash),
+            (Cmd::ToggleHistory, Some(repo)) => repo.history_open = !repo.history_open,
             (Cmd::Amend, Some(repo)) => {
                 let message = repo.commit_message.trim().to_owned();
                 repo.run(Action::Amend(message));

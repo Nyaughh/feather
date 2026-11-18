@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use crate::diff::{self, Diff};
 use crate::document::{self, Body, FileStamp, Highlights, LoadedFile};
 use crate::git::{
-    self, BlameLine, Branch, Change, SearchOptions, SearchResults, Stash, Status, Worktree,
+    self, BlameLine, Branch, Change, Commit, SearchOptions, SearchResults, Stash, Status, Worktree,
 };
 
 /// How often to look for outside changes while the window has focus.
@@ -108,6 +108,10 @@ enum Job {
         token: u64,
     },
     Act(Action),
+    Commit {
+        hash: String,
+        token: u64,
+    },
 }
 
 pub enum Event {
@@ -140,6 +144,11 @@ pub enum Event {
     },
     /// Every file that quick open can offer.
     Files(Vec<String>),
+    /// What a commit changed.
+    Commit {
+        token: u64,
+        result: Result<CommitDetail, String>,
+    },
     /// Who last changed each line of a file.
     Blame {
         rel: String,
@@ -180,10 +189,6 @@ impl Outbox {
             self.ctx.request_repaint();
         }
     }
-
-    fn send_refs(&self, root: &Path) {
-        self.send(Event::Refs(read_refs(root)));
-    }
 }
 
 /// The parts of a repository that change less often than its files.
@@ -192,13 +197,37 @@ pub struct Refs {
     pub branches: Vec<Branch>,
     pub worktrees: Vec<Worktree>,
     pub stashes: Vec<Stash>,
+    pub commits: Vec<Commit>,
 }
 
-fn read_refs(root: &Path) -> Refs {
+/// What a commit changed, for the commit view.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitDetail {
+    pub message: String,
+    pub files: Vec<diff::FileDiff>,
+}
+
+/// The history as last read, and what it was read at. Walking history can
+/// take a while in a big repository, so it is read again only when HEAD, the
+/// upstream or a branch has moved.
+#[derive(Default)]
+struct LogCache {
+    key: Option<String>,
+    commits: Vec<Commit>,
+}
+
+fn read_refs(root: &Path, cache: &mut LogCache) -> Refs {
+    let branches = git::branches(root).unwrap_or_default();
+    let key = git::history_key(root);
+    if key.is_none() || key != cache.key {
+        cache.commits = git::log(root).unwrap_or_default();
+        cache.key = key;
+    }
     Refs {
-        branches: git::branches(root).unwrap_or_default(),
+        branches,
         worktrees: git::worktrees(root).unwrap_or_default(),
         stashes: git::stashes(root).unwrap_or_default(),
+        commits: cache.commits.clone(),
     }
 }
 
@@ -236,6 +265,7 @@ impl Worker {
             last_status: None,
             last_diff: None,
             last_refs: None,
+            log_cache: LogCache::default(),
             polls: 0,
             last_fetch: None,
         };
@@ -309,6 +339,13 @@ impl Worker {
         token
     }
 
+    /// Loads what a commit changed.
+    pub fn commit(&mut self, hash: String) -> u64 {
+        let token = self.token();
+        let _ = self.jobs.send(Job::Commit { hash, token });
+        token
+    }
+
     pub fn act(&self, action: Action) {
         if action.is_network() {
             let (root, outbox) = (self.root.clone(), self.outbox.clone());
@@ -316,9 +353,9 @@ impl Worker {
             thread::spawn(move || {
                 let result = run_action(&root, &action);
                 outbox.send(Event::ActionDone { action, result });
-                // Status is always read on the git thread, so it has one source.
+                // Status and refs are always read on the git thread, so each
+                // has one source.
                 let _ = jobs.send(Job::Refresh);
-                outbox.send_refs(&root);
             });
         } else {
             let _ = self.jobs.send(Job::Act(action));
@@ -454,6 +491,7 @@ struct GitThread {
     last_status: Option<Result<Status, String>>,
     last_diff: Option<(u64, Result<Diff, String>)>,
     last_refs: Option<Refs>,
+    log_cache: LogCache,
     polls: u32,
     last_fetch: Option<Instant>,
 }
@@ -494,11 +532,22 @@ impl GitThread {
                 staged,
                 token,
             } => self.send_diff(&change, staged, token, true),
+            Job::Commit { hash, token } => {
+                let result =
+                    git::show_commit(&self.root, &hash).map(|(message, patch)| CommitDetail {
+                        message,
+                        files: diff::parse_files(&patch),
+                    });
+                self.outbox.send(Event::Commit { token, result });
+            }
             Job::Act(action) => {
                 let result = run_action(&self.root, &action);
                 let refs_changed = matches!(
                     action,
                     Action::Commit(_)
+                        | Action::Fetch
+                        | Action::Pull
+                        | Action::Push { .. }
                         | Action::Amend(_)
                         | Action::UndoCommit
                         | Action::Stash
@@ -586,7 +635,7 @@ impl GitThread {
         if !self.is_git {
             return;
         }
-        let refs = read_refs(&self.root);
+        let refs = read_refs(&self.root, &mut self.log_cache);
         if force || self.last_refs.as_ref() != Some(&refs) {
             self.last_refs = Some(refs.clone());
             self.outbox.send(Event::Refs(refs));

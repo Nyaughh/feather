@@ -35,6 +35,70 @@ impl Diff {
     }
 }
 
+/// One file's part of a patch that covers several.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileDiff {
+    pub path: String,
+    pub diff: Diff,
+}
+
+/// Splits a patch from `git show` into its files.
+pub fn parse_files(raw: &str) -> Vec<FileDiff> {
+    let mut files = Vec::new();
+    let mut start = None;
+    let mut offset = 0;
+    let flush = |chunk: &str, files: &mut Vec<FileDiff>| {
+        files.push(FileDiff {
+            path: patch_path(chunk),
+            diff: parse(chunk),
+        });
+    };
+    for line in raw.split_inclusive('\n') {
+        if line.starts_with("diff --git ") {
+            if let Some(from) = start {
+                flush(&raw[from..offset], &mut files);
+            }
+            start = Some(offset);
+        }
+        offset += line.len();
+    }
+    if let Some(from) = start {
+        flush(&raw[from..], &mut files);
+    }
+    files
+}
+
+/// The path a file's patch is about: where it ends up, or where it was if
+/// it was deleted.
+fn patch_path(chunk: &str) -> String {
+    let mut deleted_from = None;
+    for line in chunk.lines() {
+        if let Some(path) = line.strip_prefix("+++ b/") {
+            return path.to_owned();
+        }
+        if let Some(path) = line.strip_prefix("rename to ") {
+            return path.to_owned();
+        }
+        if let Some(path) = line.strip_prefix("--- a/") {
+            deleted_from = Some(path.to_owned());
+        }
+        if line.starts_with("@@") {
+            break;
+        }
+    }
+    if let Some(path) = deleted_from {
+        return path;
+    }
+    // A file with no content change (a mode change, or binary): the header
+    // is "diff --git a/<path> b/<path>".
+    let header = chunk.lines().next().unwrap_or("");
+    let rest = header.strip_prefix("diff --git a/").unwrap_or(header);
+    match rest.rsplit_once(" b/") {
+        Some((_, path)) => path.to_owned(),
+        None => rest.to_owned(),
+    }
+}
+
 pub fn parse(raw: &str) -> Diff {
     let mut diff = Diff::default();
     let (mut old_no, mut new_no) = (0u32, 0u32);
@@ -136,6 +200,19 @@ pub fn expand_tabs(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn splits_a_commit_into_its_files() {
+        let raw = "diff --git a/src/a.rs b/src/a.rs\nindex 1..2 100644\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/gone.txt b/gone.txt\ndeleted file mode 100644\n--- a/gone.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-bye\ndiff --git a/logo.png b/logo.png\nnew file mode 100644\nBinary files /dev/null and b/logo.png differ\ndiff --git a/old name.txt b/new name.txt\nsimilarity index 100%\nrename from old name.txt\nrename to new name.txt\n";
+        let files = parse_files(raw);
+        let paths: Vec<_> = files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["src/a.rs", "gone.txt", "logo.png", "new name.txt"]);
+        assert_eq!((files[0].diff.additions, files[0].diff.deletions), (1, 1));
+        assert_eq!(files[1].diff.deletions, 1);
+        assert!(files[2].diff.binary);
+        assert!(files[3].diff.is_empty());
+        assert_eq!(parse_files(""), []);
+    }
 
     #[test]
     fn parses_hunks_and_numbers() {

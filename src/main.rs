@@ -5,6 +5,7 @@ mod app;
 mod diff;
 mod document;
 mod git;
+mod graph;
 mod images;
 mod markdown;
 mod settings;
