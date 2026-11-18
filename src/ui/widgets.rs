@@ -259,13 +259,15 @@ pub fn empty_state(ui: &mut Ui, icon: &str, title: &str, detail: Option<&str>) {
         theme::text_secondary(),
     );
     if let Some(detail) = detail {
-        let galley = ui.painter().layout(
+        // Each wrapped line centred under the title, not just the block.
+        let mut job = LayoutJob::single_section(
             detail.to_owned(),
-            theme::ui_font(12.5),
-            theme::text_muted(),
-            (rect.width() - 48.0).clamp(80.0, 460.0),
+            egui::TextFormat::simple(theme::ui_font(12.5), theme::text_muted()),
         );
-        let pos = pos2(center.x - galley.size().x / 2.0, center.y + 22.0);
+        job.wrap.max_width = (rect.width() - 48.0).clamp(80.0, 460.0);
+        job.halign = egui::Align::Center;
+        let galley = ui.painter().layout_job(job);
+        let pos = pos2(center.x, center.y + 22.0);
         ui.painter()
             .galley(pos.round(), galley, theme::text_muted());
     }
@@ -276,7 +278,8 @@ pub fn popup_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(theme::bg_elevated())
         .stroke(Stroke::new(1.0, theme::border_strong()))
-        .corner_radius(CornerRadius::same(8))
+        // The same as egui's own menus, so submenus match the menu they open from.
+        .corner_radius(CornerRadius::same(theme::panel_radius()))
         .inner_margin(egui::Margin::same(4))
         .shadow(theme::popup_shadow())
 }

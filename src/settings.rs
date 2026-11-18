@@ -99,6 +99,8 @@ pub struct Settings {
 
     /// Show who last changed the line the cursor is on.
     pub blame: bool,
+    /// The commit list in the Git tab is expanded.
+    pub history_open: bool,
 
     /// Look for a new version on launch and every few hours.
     pub auto_update: bool,
@@ -127,6 +129,7 @@ impl Default for Settings {
             shell: String::new(),
             auto_fetch: true,
             blame: true,
+            history_open: false,
             auto_update: true,
             revision: 0,
         }

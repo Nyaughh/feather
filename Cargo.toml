@@ -1,6 +1,6 @@
 [package]
 name = "feather"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 description = "A fast, minimal repository viewer and git client"
 
@@ -49,3 +49,9 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# egui_commonmark's code blocks with one change: the copy button is centred on
+# the first line of code instead of pinned near the top edge. See
+# vendor/egui_commonmark_backend/src/elements.rs ("Feather:").
+[patch.crates-io]
+egui_commonmark_backend = { path = "vendor/egui_commonmark_backend" }

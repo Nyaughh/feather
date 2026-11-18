@@ -11,8 +11,8 @@ use std::time::Duration;
 use crate::diff::Diff;
 use crate::document::{self, Body, Highlights, LoadedFile, Preview, Span, TextDoc};
 use crate::git::{
-    self, BlameLine, Branch, Change, ChangeKind, Commit, SearchOptions, SearchResults, Stash,
-    Status, Worktree,
+    self, BlameLine, Branch, Change, ChangeKind, Commit, CommitInfo, SearchOptions, SearchResults,
+    Stash, Status, Worktree,
 };
 use crate::settings::Settings;
 use crate::terminal::Terminals;
@@ -65,9 +65,15 @@ pub enum Cmd {
     /// Show a commit from the history.
     OpenCommit(String),
     ToggleHistory,
+    /// Load what the hover card for a commit shows.
+    LoadCommitInfo(String),
     /// Fold staged changes into the last commit, using the commit box's
     /// message if it has one.
     Amend,
+    /// The same, staging everything first.
+    AmendAll,
+    /// Stage everything and commit it with the commit box's message.
+    CommitAll,
     ToggleSidebar,
     ToggleSettings,
     /// Open the dialog for pasting in a theme.
@@ -358,8 +364,10 @@ pub struct Repo {
     /// Recent history, newest first, and the lines of its graph.
     pub commits: Vec<Commit>,
     pub graph: Vec<crate::graph::Row>,
-    /// Whether the history list under the changes is expanded.
-    pub history_open: bool,
+    /// Hover card details, by commit; `None` while loading.
+    pub commit_info: HashMap<String, Option<Result<CommitInfo, String>>>,
+    /// `owner/name` when the repository is on GitHub.
+    pub github: Option<String>,
     /// The message of a commit being undone, to put back in the commit box.
     undone_message: Option<String>,
     /// The stash waiting on "delete it?".
@@ -404,7 +412,8 @@ impl Repo {
             stashes: Vec::new(),
             commits: Vec::new(),
             graph: Vec::new(),
-            history_open: true,
+            commit_info: HashMap::new(),
+            github: None,
             undone_message: None,
             confirm_drop_stash: None,
             tab: Tab::Files,
@@ -507,6 +516,10 @@ impl Repo {
             return;
         };
         let token = self.worker.commit(commit.hash.clone());
+        if !self.commit_info.contains_key(&commit.hash) {
+            self.commit_info.insert(commit.hash.clone(), None);
+            self.worker.commit_info(commit.hash.clone());
+        }
         self.worker.watch(Watch::Nothing);
         self.view = View::Commit(CommitView {
             commit,
@@ -686,6 +699,9 @@ impl Repo {
                     }
                 }
             }
+            Event::CommitInfo { hash, result } => {
+                self.commit_info.insert(hash, Some(result));
+            }
             Event::Commit { token, result } => {
                 if let View::Commit(view) = &mut self.view
                     && view.token == token
@@ -705,7 +721,10 @@ impl Repo {
                 self.busy = None;
                 match result {
                     Ok(()) => match action {
-                        Action::Commit(_) | Action::Amend(_) => self.commit_message.clear(),
+                        Action::Commit(_)
+                        | Action::CommitAll(_)
+                        | Action::Amend(_)
+                        | Action::AmendAll(_) => self.commit_message.clear(),
                         // The message comes back with the changes, ready to edit.
                         Action::UndoCommit => {
                             if let Some(message) = self.undone_message.take()
@@ -895,8 +914,9 @@ impl App {
         let path = path.canonicalize().unwrap_or_else(|_| path.to_owned());
         let path = strip_verbatim(path);
         let repo = Repo::open(&path, ctx);
-        let github = repo.is_git.then(|| git::github_slug(&repo.root)).flatten();
-        self.images.set_repository(&repo.root, github);
+        let mut repo = repo;
+        repo.github = repo.is_git.then(|| git::github_slug(&repo.root)).flatten();
+        self.images.set_repository(&repo.root, repo.github.clone());
         self.settings.recent.retain(|p| *p != repo.root);
         self.settings.recent.insert(0, repo.root.clone());
         self.settings.recent.truncate(MAX_RECENT);
@@ -1210,10 +1230,28 @@ impl App {
             (Cmd::AskDiscardAll, Some(repo)) => repo.confirm_discard_all = true,
             (Cmd::AskDropStash(stash), Some(repo)) => repo.confirm_drop_stash = Some(stash),
             (Cmd::OpenCommit(hash), Some(repo)) => repo.open_commit(&hash),
-            (Cmd::ToggleHistory, Some(repo)) => repo.history_open = !repo.history_open,
+            (Cmd::ToggleHistory, _) => {
+                self.settings.history_open = !self.settings.history_open;
+            }
+            (Cmd::LoadCommitInfo(hash), Some(repo)) => {
+                if !repo.commit_info.contains_key(&hash) {
+                    repo.commit_info.insert(hash.clone(), None);
+                    repo.worker.commit_info(hash);
+                }
+            }
             (Cmd::Amend, Some(repo)) => {
                 let message = repo.commit_message.trim().to_owned();
                 repo.run(Action::Amend(message));
+            }
+            (Cmd::AmendAll, Some(repo)) => {
+                let message = repo.commit_message.trim().to_owned();
+                repo.run(Action::AmendAll(message));
+            }
+            (Cmd::CommitAll, Some(repo)) => {
+                let message = repo.commit_message.trim().to_owned();
+                if !message.is_empty() && repo.status.change_count() > 0 {
+                    repo.run(Action::CommitAll(message));
+                }
             }
             (Cmd::OpenDiff { change, staged }, Some(repo)) => repo.open_diff(change, staged),
             (Cmd::Act(action), Some(repo)) => repo.run(action),

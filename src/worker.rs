@@ -20,7 +20,8 @@ use std::time::{Duration, Instant};
 use crate::diff::{self, Diff};
 use crate::document::{self, Body, FileStamp, Highlights, LoadedFile};
 use crate::git::{
-    self, BlameLine, Branch, Change, Commit, SearchOptions, SearchResults, Stash, Status, Worktree,
+    self, BlameLine, Branch, Change, Commit, CommitInfo, SearchOptions, SearchResults, Stash,
+    Status, Worktree,
 };
 
 /// How often to look for outside changes while the window has focus.
@@ -40,8 +41,12 @@ pub enum Action {
     /// Throw away every unstaged change.
     DiscardAll,
     Commit(String),
+    /// Stage everything, then commit it.
+    CommitAll(String),
     /// Fold what is staged into the last commit; an empty message keeps its own.
     Amend(String),
+    /// Stage everything, then fold it into the last commit.
+    AmendAll(String),
     /// Take back the last commit, leaving its changes staged.
     UndoCommit,
     /// Set every change aside.
@@ -71,7 +76,9 @@ impl Action {
             Self::Stage(_) | Self::StageAll => "Staging…",
             Self::Unstage(_) | Self::UnstageAll => "Unstaging…",
             Self::Discard(_) | Self::DiscardAll => "Discarding…",
-            Self::Commit(_) | Self::Amend(_) => "Committing…",
+            Self::Commit(_) | Self::CommitAll(_) | Self::Amend(_) | Self::AmendAll(_) => {
+                "Committing…"
+            }
             Self::UndoCommit => "Undoing…",
             Self::Stash => "Stashing…",
             Self::StashApply(_) | Self::StashPop(_) => "Applying…",
@@ -112,6 +119,7 @@ enum Job {
         hash: String,
         token: u64,
     },
+    CommitInfo(String),
 }
 
 pub enum Event {
@@ -148,6 +156,11 @@ pub enum Event {
     Commit {
         token: u64,
         result: Result<CommitDetail, String>,
+    },
+    /// The details for a commit's hover card.
+    CommitInfo {
+        hash: String,
+        result: Result<CommitInfo, String>,
     },
     /// Who last changed each line of a file.
     Blame {
@@ -346,6 +359,11 @@ impl Worker {
         token
     }
 
+    /// Loads the details shown when hovering a commit.
+    pub fn commit_info(&self, hash: String) {
+        let _ = self.jobs.send(Job::CommitInfo(hash));
+    }
+
     pub fn act(&self, action: Action) {
         if action.is_network() {
             let (root, outbox) = (self.root.clone(), self.outbox.clone());
@@ -468,6 +486,10 @@ fn run_action(root: &Path, action: &Action) -> Result<(), String> {
         Action::DiscardAll => git::discard_all(root),
         Action::Commit(message) => git::commit(root, message),
         Action::Amend(message) => git::amend(root, message),
+        Action::CommitAll(message) => {
+            git::stage_all(root).and_then(|()| git::commit(root, message))
+        }
+        Action::AmendAll(message) => git::stage_all(root).and_then(|()| git::amend(root, message)),
         Action::UndoCommit => git::undo_commit(root),
         Action::Stash => git::stash_push(root),
         Action::StashApply(index) => git::stash_apply(root, *index),
@@ -540,6 +562,10 @@ impl GitThread {
                     });
                 self.outbox.send(Event::Commit { token, result });
             }
+            Job::CommitInfo(hash) => {
+                let result = git::commit_info(&self.root, &hash);
+                self.outbox.send(Event::CommitInfo { hash, result });
+            }
             Job::Act(action) => {
                 let result = run_action(&self.root, &action);
                 let refs_changed = matches!(
@@ -549,6 +575,8 @@ impl GitThread {
                         | Action::Pull
                         | Action::Push { .. }
                         | Action::Amend(_)
+                        | Action::CommitAll(_)
+                        | Action::AmendAll(_)
                         | Action::UndoCommit
                         | Action::Stash
                         | Action::StashApply(_)

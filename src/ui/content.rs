@@ -62,7 +62,13 @@ pub fn show(
             diff_header(ui, view, idle, cmds);
             diff_body(ui, view);
         }
-        View::Commit(view) => commit_view(ui, view),
+        View::Commit(view) => {
+            let info = match repo.commit_info.get(&view.commit.hash) {
+                Some(Some(Ok(info))) => Some(info),
+                _ => None,
+            };
+            commit_view(ui, view, info);
+        }
     }
 }
 
@@ -77,7 +83,7 @@ enum CommitRow {
     Gap,
 }
 
-fn commit_view(ui: &mut Ui, view: &CommitView) {
+fn commit_view(ui: &mut Ui, view: &CommitView, info: Option<&crate::git::CommitInfo>) {
     let commit = &view.commit;
     let files = match &view.detail {
         Some(Ok(detail)) => Some(detail),
@@ -155,6 +161,9 @@ fn commit_view(ui: &mut Ui, view: &CommitView) {
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 6.0);
             let mut who = format!("{} committed {}", commit.author, time_ago(commit.time, now));
+            if let Some(info) = info {
+                who.push_str(&format!(" ({})", info.date));
+            }
             if !commit.refs.is_empty() {
                 who.push_str(" · ");
                 who.push_str(&commit.refs.join(", "));

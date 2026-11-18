@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.1
+
+- **Commits, more like VS Code**: the list now sits under Pull, Push and Fetch and starts folded; Feather remembers whether you opened it. Each row shows the author after the message, and branches and tags as labelled pills (your current branch highlighted, remote branches with a cloud, tags with a tag). Rest the pointer on a commit for a card beside the sidebar with the author, the exact date, the whole message, how many files and lines it changed, its branches, and buttons to copy the hash or open it on GitHub.
+- **The "..." menu works like VS Code's**: Pull, Push and Fetch, then **Commit**, **Changes** and **Stash** open their own menus to the side. Commit has Commit Staged, Commit All, Undo Last Commit and the two Amend options; Changes has stage, unstage and discard all; Stash has stash, pop and apply latest, and every stash with its own Pop, Apply and Delete.
+- The copy button on code blocks in Markdown is centred on one-line blocks and level with the first line of longer ones.
+- Text in the Go to file and branch search fields sits in the middle of the field, and the longer messages in empty panels are centred line by line.
+- The commit view shows the exact date beside "committed 6 hours ago".
+
 ## 0.6.0
 
 - **Commit history**: the Git tab now lists recent commits under your changes, with the branch graph drawn beside them: a line per branch, merges where lines join, and your current commit ringed. Commits on the remote that you have not pulled yet show hollow and dimmed, and the heading counts them. Click a commit to see its message and every file it changed. The list can be folded away or resized by dragging its top edge.

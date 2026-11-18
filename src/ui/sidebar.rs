@@ -2,9 +2,9 @@
 //! worktree + branch pickers pinned to the bottom.
 
 use eframe::egui::{
-    self, Align2, CentralPanel, Color32, CornerRadius, CursorIcon, Frame, Id, Margin, Panel, Popup,
-    PopupCloseBehavior, Pos2, Rect, RectAlign, Response, ScrollArea, Sense, Stroke, TextEdit, Ui,
-    pos2, vec2,
+    self, Align2, CentralPanel, Color32, CornerRadius, CursorIcon, Frame, Id, Label, Margin, Panel,
+    Popup, PopupCloseBehavior, Pos2, Rect, RectAlign, Response, ScrollArea, Sense, Stroke,
+    TextEdit, Ui, pos2, vec2,
 };
 
 use super::virtual_rows;
@@ -53,13 +53,15 @@ pub fn show(ui: &mut Ui, repo: &mut Repo, settings: &Settings, cmds: &mut Vec<Cm
                 .show(ui, |ui| super::search::show(ui, repo, cmds));
         }
         Tab::Git => {
+            // Bottom panels stack upwards: commits at the bottom, the commit
+            // box above them, the changes in what is left.
+            if repo.is_git {
+                history(ui, repo, settings, cmds);
+            }
             Panel::bottom("commit_box")
                 .frame(Frame::new().inner_margin(Margin::same(PAD as i8)))
                 .show_separator_line(false)
                 .show(ui, |ui| commit_box(ui, repo, cmds));
-            if repo.is_git {
-                history(ui, repo, cmds);
-            }
             CentralPanel::default()
                 .frame(Frame::new())
                 .show(ui, |ui| changes(ui, repo, cmds));
@@ -471,28 +473,6 @@ fn list_header(ui: &Ui, rect: Rect, label: &str, count: usize) {
     );
 }
 
-/// One row of a menu of actions. A disabled one is dimmed and says why.
-fn action_item(ui: &mut Ui, glyph: &str, label: &str, enabled: bool, why_not: &str) -> bool {
-    let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click());
-    let mid = rect.center().y;
-    paint_row_bg(ui, rect, enabled && response.hovered(), false);
-    let (text, glyph_color) = if enabled {
-        (theme::text(), theme::text_secondary())
-    } else {
-        (theme::text_faint(), theme::text_faint())
-    };
-    paint_icon(ui, pos2(rect.left() + 16.0, mid), glyph, 14.0, glyph_color);
-    let label = elided(ui, label, theme::ui_font(13.0), text, rect.width() - 40.0);
-    paint_galley(ui, rect.left() + 32.0, mid, label);
-    if enabled {
-        response.on_hover_cursor(CursorIcon::PointingHand).clicked()
-    } else {
-        response.on_hover_text(why_not);
-        false
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn change_row(
     ui: &mut Ui,
@@ -690,26 +670,27 @@ fn commit_box(ui: &mut Ui, repo: &mut Repo, cmds: &mut Vec<Cmd>) {
     });
 }
 
-/// Which page the "..." menu is on.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum MenuPage {
-    Main,
-    Stashes,
-    Stash(usize),
-}
-
-/// A menu row that leads to another page: label, then a count and an arrow.
-fn nav_item(ui: &mut Ui, glyph: &str, label: &str, detail: &str, enabled: bool) -> bool {
+/// A menu row that opens a submenu beside it: label, an optional count,
+/// and an arrow.
+fn submenu_row(ui: &mut Ui, label: &str, detail: &str, enabled: bool) -> Response {
     let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click());
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 30.0), sense);
     let mid = rect.center().y;
-    paint_row_bg(ui, rect, enabled && response.hovered(), false);
+    let open = Popup::is_id_open(
+        ui.ctx(),
+        egui::containers::menu::SubMenu::id_from_widget_id(response.id),
+    );
+    paint_row_bg(ui, rect, enabled && (response.hovered() || open), false);
     let (text, muted) = if enabled {
         (theme::text(), theme::text_secondary())
     } else {
         (theme::text_faint(), theme::text_faint())
     };
-    paint_icon(ui, pos2(rect.left() + 16.0, mid), glyph, 14.0, muted);
     paint_icon(
         ui,
         pos2(rect.right() - 14.0, mid),
@@ -717,45 +698,44 @@ fn nav_item(ui: &mut Ui, glyph: &str, label: &str, detail: &str, enabled: bool) 
         12.0,
         muted,
     );
-    let count =
-        ui.painter()
-            .layout_no_wrap(detail.to_owned(), theme::ui_font(12.0), theme::text_muted());
-    let count_x = rect.right() - 26.0 - count.size().x;
-    paint_galley(ui, count_x, mid, count);
-    let label = elided(
-        ui,
-        label,
-        theme::ui_font(13.0),
-        text,
-        count_x - 8.0 - rect.left() - 32.0,
-    );
-    paint_galley(ui, rect.left() + 32.0, mid, label);
-    enabled && response.on_hover_cursor(CursorIcon::PointingHand).clicked()
+    let mut right = rect.right() - 26.0;
+    if !detail.is_empty() {
+        let count = ui.painter().layout_no_wrap(
+            detail.to_owned(),
+            theme::ui_font(12.0),
+            theme::text_muted(),
+        );
+        right -= count.size().x;
+        paint_galley(ui, right, mid, count);
+        right -= 8.0;
+    }
+    let x = rect.left() + 10.0;
+    let label = elided(ui, label, theme::ui_font(13.0), text, right - x);
+    paint_galley(ui, x, mid, label);
+    response
 }
 
-/// The top row of a page: a way back, and where you are.
-fn back_item(ui: &mut Ui, title: &str) -> bool {
+/// A plain menu row: label only, dimmed and explained when it can't be used.
+fn plain_item(ui: &mut Ui, label: &str, enabled: bool, why_not: &str) -> bool {
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click());
-    let response = response.on_hover_cursor(CursorIcon::PointingHand);
     let mid = rect.center().y;
-    paint_row_bg(ui, rect, response.hovered(), false);
-    paint_icon(
-        ui,
-        pos2(rect.left() + 16.0, mid),
-        icon::CARET_LEFT,
-        12.0,
-        theme::text_secondary(),
-    );
-    let title = elided(
-        ui,
-        title,
-        theme::medium_font(12.5),
-        theme::text_secondary(),
-        rect.width() - 40.0,
-    );
-    paint_galley(ui, rect.left() + 32.0, mid, title);
-    response.clicked()
+    paint_row_bg(ui, rect, enabled && response.hovered(), false);
+    let color = if enabled {
+        theme::text()
+    } else {
+        theme::text_faint()
+    };
+    let label = elided(ui, label, theme::ui_font(13.0), color, rect.width() - 20.0);
+    paint_galley(ui, rect.left() + 10.0, mid, label);
+    if enabled {
+        response.on_hover_cursor(CursorIcon::PointingHand).clicked()
+    } else {
+        if !why_not.is_empty() {
+            response.on_hover_text(why_not);
+        }
+        false
+    }
 }
 
 fn menu_separator(ui: &mut Ui) {
@@ -767,20 +747,42 @@ fn menu_separator(ui: &mut Ui) {
     );
 }
 
-/// One stash in the list: its name, and how long ago it was made.
-fn stash_item(ui: &mut Ui, stash: &Stash, now: i64) -> bool {
+/// A small heading inside a menu.
+fn menu_heading(ui: &mut Ui, text: &str) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
+    ui.painter().text(
+        pos2(rect.left() + 10.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        text,
+        theme::medium_font(11.5),
+        theme::text_muted(),
+    );
+}
+
+/// One stash in the list: its name and age, opening its actions beside it.
+fn stash_row(ui: &mut Ui, stash: &Stash, now: i64) -> Response {
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click());
-    let response = response.on_hover_cursor(CursorIcon::PointingHand);
     let mid = rect.center().y;
-    paint_row_bg(ui, rect, response.hovered(), false);
+    let open = Popup::is_id_open(
+        ui.ctx(),
+        egui::containers::menu::SubMenu::id_from_widget_id(response.id),
+    );
+    paint_row_bg(ui, rect, response.hovered() || open, false);
+    paint_icon(
+        ui,
+        pos2(rect.right() - 14.0, mid),
+        icon::CARET_RIGHT,
+        12.0,
+        theme::text_secondary(),
+    );
     let age = ui.painter().layout_no_wrap(
         super::content::time_ago(stash.time, now),
         theme::ui_font(11.5),
         theme::text_muted(),
     );
-    let age_x = rect.right() - 10.0 - age.size().x;
-    paint_galley(ui, age_x, mid + 0.5, age);
+    let age_x = rect.right() - 26.0 - age.size().x;
+    paint_galley(ui, age_x, mid, age);
     let x = rect.left() + 10.0;
     let label = elided(
         ui,
@@ -790,17 +792,26 @@ fn stash_item(ui: &mut Ui, stash: &Stash, now: i64) -> bool {
         age_x - 8.0 - x,
     );
     paint_galley(ui, x, mid, label);
-    response.clicked()
+    response
 }
 
-/// The "..." beside Commit: stash, amend, undo, and the list of stashes.
+/// Opens `content` beside `row` while the row is hovered, as VS Code's menus do.
+fn submenu(ui: &Ui, row: &Response, width: f32, content: impl FnOnce(&mut Ui)) {
+    egui::containers::menu::SubMenu::new().show(ui, row, |ui| {
+        ui.set_width(width);
+        ui.spacing_mut().item_spacing.y = 0.0;
+        content(ui);
+    });
+}
+
+/// The "..." beside Commit: pull, push and fetch, then commit, changes and
+/// stash options in submenus.
 fn more_actions(ui: &mut Ui, repo: &Repo, size: f32, cmds: &mut Vec<Cmd>) {
     let (rect, response) = ui.allocate_exact_size(vec2(size, 30.0), Sense::click());
     let response = response
         .on_hover_cursor(CursorIcon::PointingHand)
-        .on_hover_text("Stash, amend, undo");
-    let popup_id = Popup::default_response_id(&response);
-    let open = Popup::is_id_open(ui.ctx(), popup_id);
+        .on_hover_text("More git actions");
+    let open = Popup::is_id_open(ui.ctx(), Popup::default_response_id(&response));
     // Shaped like the Commit button beside it.
     ui.painter().rect_filled(
         rect,
@@ -809,138 +820,191 @@ fn more_actions(ui: &mut Ui, repo: &Repo, size: f32, cmds: &mut Vec<Cmd>) {
     );
     paint_icon(ui, rect.center(), icon::MORE, 16.0, theme::text());
 
-    // Every time the menu opens, it starts on its first page.
-    let page_id = popup_id.with("page");
-    if !open {
-        ui.data_mut(|d| d.remove::<MenuPage>(page_id));
-    }
-    let mut page = ui
-        .data(|d| d.get_temp::<MenuPage>(page_id))
-        .unwrap_or(MenuPage::Main);
-    if let MenuPage::Stash(index) = page
-        && index >= repo.stashes.len()
-    {
-        page = MenuPage::Stashes;
-    }
-
     let idle = repo.busy.is_none();
     let busy = "Wait for the current git action to finish";
-    let has_changes = repo.status.change_count() > 0;
+    let status = &repo.status;
+    let has_changes = status.change_count() > 0;
+    let has_message = !repo.commit_message.trim().is_empty();
     let rewritable = repo.can_rewrite_last_commit();
     let why_not_rewrite = if !idle {
         busy
-    } else if repo.status.head.is_none() {
+    } else if status.head.is_none() {
         "There is no commit yet"
     } else {
         "The last commit is already pushed"
     };
-    let amend_has_something =
-        !repo.status.staged.is_empty() || !repo.commit_message.trim().is_empty();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64);
 
-    let mut next = page;
     Popup::menu(&response)
         .frame(popup_frame())
         .align(RectAlign::TOP_END)
-        // Stay above the button, right edges lined up, whichever page is open.
         .align_alternatives(&[RectAlign::TOP_END])
         .gap(4.0)
-        // Moving between pages is a click inside; only actions close it.
-        .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
-            ui.set_width(250.0);
+            ui.set_width(200.0);
             ui.spacing_mut().item_spacing.y = 0.0;
-            match page {
-                MenuPage::Main => {
-                    if action_item(
-                        ui,
-                        icon::STASH,
-                        "Stash changes",
-                        idle && has_changes,
-                        if idle {
-                            "There are no changes to stash"
-                        } else {
-                            busy
-                        },
-                    ) {
-                        cmds.push(Cmd::Act(Action::Stash));
-                        ui.close();
-                    }
-                    if action_item(
-                        ui,
-                        icon::PENCIL,
-                        "Amend last commit",
-                        rewritable && amend_has_something,
-                        if rewritable {
-                            "Stage changes or write a new message to amend with"
-                        } else {
-                            why_not_rewrite
-                        },
-                    ) {
-                        cmds.push(Cmd::Amend);
-                        ui.close();
-                    }
-                    if action_item(
-                        ui,
-                        icon::UNDO,
-                        "Undo last commit",
-                        rewritable,
-                        why_not_rewrite,
-                    ) {
-                        cmds.push(Cmd::Act(Action::UndoCommit));
-                        ui.close();
-                    }
-                    menu_separator(ui);
-                    let count = repo.stashes.len();
-                    if nav_item(ui, icon::STASH, "Stashes", &count.to_string(), count > 0) {
-                        next = MenuPage::Stashes;
-                    }
-                }
-                MenuPage::Stashes => {
-                    if back_item(ui, "Stashes") {
-                        next = MenuPage::Main;
-                    }
-                    menu_separator(ui);
-                    if repo.stashes.is_empty() {
-                        action_item(ui, icon::CHECK, "No stashes", false, "");
-                    }
-                    ScrollArea::vertical()
-                        .id_salt("stash_list")
-                        .max_height(320.0)
-                        .show(ui, |ui| {
-                            for stash in &repo.stashes {
-                                if stash_item(ui, stash, now) {
-                                    next = MenuPage::Stash(stash.index);
-                                }
-                            }
-                        });
-                }
-                MenuPage::Stash(index) => {
-                    let stash = &repo.stashes[index];
-                    if back_item(ui, &stash.label) {
-                        next = MenuPage::Stashes;
-                    }
-                    menu_separator(ui);
-                    if action_item(ui, icon::ARROW_UP, "Apply and remove", idle, busy) {
-                        cmds.push(Cmd::Act(Action::StashPop(index)));
-                        ui.close();
-                    }
-                    if action_item(ui, icon::CHECK, "Apply and keep", idle, busy) {
-                        cmds.push(Cmd::Act(Action::StashApply(index)));
-                        ui.close();
-                    }
-                    if action_item(ui, icon::TRASH, "Delete", idle, busy) {
-                        cmds.push(Cmd::AskDropStash(stash.clone()));
-                        ui.close();
-                    }
-                }
+            let has_upstream = status.upstream.is_some();
+            if plain_item(ui, "Pull", idle, busy) {
+                cmds.push(Cmd::Act(Action::Pull));
             }
+            if plain_item(ui, "Push", idle, busy) {
+                cmds.push(Cmd::Act(Action::Push { has_upstream }));
+            }
+            if plain_item(ui, "Fetch", idle, busy) {
+                cmds.push(Cmd::Act(Action::Fetch));
+            }
+            menu_separator(ui);
+
+            let row = submenu_row(ui, "Commit", "", true);
+            submenu(ui, &row, 220.0, |ui| {
+                let why_not_commit = if !idle {
+                    busy
+                } else if !has_message {
+                    "Write a commit message first"
+                } else {
+                    "Stage changes to commit them"
+                };
+                if plain_item(ui, "Commit Staged", repo.can_commit(), why_not_commit) {
+                    cmds.push(Cmd::Commit);
+                }
+                if plain_item(
+                    ui,
+                    "Commit All",
+                    idle && has_message && has_changes,
+                    if !idle {
+                        busy
+                    } else if !has_message {
+                        "Write a commit message first"
+                    } else {
+                        "There are no changes to commit"
+                    },
+                ) {
+                    cmds.push(Cmd::CommitAll);
+                }
+                if plain_item(ui, "Undo Last Commit", rewritable, why_not_rewrite) {
+                    cmds.push(Cmd::Act(Action::UndoCommit));
+                }
+                menu_separator(ui);
+                if plain_item(
+                    ui,
+                    "Commit Staged (Amend)",
+                    rewritable && (!status.staged.is_empty() || has_message),
+                    if rewritable {
+                        "Stage changes or write a new message to amend with"
+                    } else {
+                        why_not_rewrite
+                    },
+                ) {
+                    cmds.push(Cmd::Amend);
+                }
+                if plain_item(
+                    ui,
+                    "Commit All (Amend)",
+                    rewritable && (has_changes || has_message),
+                    if rewritable {
+                        "Make changes or write a new message to amend with"
+                    } else {
+                        why_not_rewrite
+                    },
+                ) {
+                    cmds.push(Cmd::AmendAll);
+                }
+            });
+
+            let row = submenu_row(ui, "Changes", "", true);
+            submenu(ui, &row, 220.0, |ui| {
+                let nothing = "There are no changes";
+                if plain_item(
+                    ui,
+                    "Stage All Changes",
+                    idle && !status.unstaged.is_empty(),
+                    if idle { nothing } else { busy },
+                ) {
+                    cmds.push(Cmd::Act(Action::StageAll));
+                }
+                if plain_item(
+                    ui,
+                    "Unstage All Changes",
+                    idle && !status.staged.is_empty(),
+                    if idle { "Nothing is staged" } else { busy },
+                ) {
+                    cmds.push(Cmd::Act(Action::UnstageAll));
+                }
+                if plain_item(
+                    ui,
+                    "Discard All Changes",
+                    idle && !status.unstaged.is_empty(),
+                    if idle { nothing } else { busy },
+                ) {
+                    cmds.push(Cmd::AskDiscardAll);
+                }
+            });
+
+            let count = repo.stashes.len();
+            let detail = if count > 0 {
+                count.to_string()
+            } else {
+                String::new()
+            };
+            let row = submenu_row(ui, "Stash", &detail, true);
+            submenu(ui, &row, 260.0, |ui| {
+                if plain_item(
+                    ui,
+                    "Stash All Changes",
+                    idle && has_changes,
+                    if idle {
+                        "There are no changes to stash"
+                    } else {
+                        busy
+                    },
+                ) {
+                    cmds.push(Cmd::Act(Action::Stash));
+                }
+                let none = "There are no stashes";
+                if plain_item(
+                    ui,
+                    "Pop Latest Stash",
+                    idle && count > 0,
+                    if idle { none } else { busy },
+                ) {
+                    cmds.push(Cmd::Act(Action::StashPop(0)));
+                }
+                if plain_item(
+                    ui,
+                    "Apply Latest Stash",
+                    idle && count > 0,
+                    if idle { none } else { busy },
+                ) {
+                    cmds.push(Cmd::Act(Action::StashApply(0)));
+                }
+                if count == 0 {
+                    return;
+                }
+                menu_separator(ui);
+                menu_heading(ui, "Stashes");
+                ScrollArea::vertical()
+                    .id_salt("stash_list")
+                    .max_height(330.0)
+                    .show(ui, |ui| {
+                        for stash in &repo.stashes {
+                            let row = stash_row(ui, stash, now);
+                            submenu(ui, &row, 180.0, |ui| {
+                                if plain_item(ui, "Pop", idle, busy) {
+                                    cmds.push(Cmd::Act(Action::StashPop(stash.index)));
+                                }
+                                if plain_item(ui, "Apply", idle, busy) {
+                                    cmds.push(Cmd::Act(Action::StashApply(stash.index)));
+                                }
+                                if plain_item(ui, "Delete…", idle, busy) {
+                                    cmds.push(Cmd::AskDropStash(stash.clone()));
+                                }
+                            });
+                        }
+                    });
+            });
         });
-    if next != page {
-        ui.data_mut(|d| d.insert_temp(page_id, next));
-    }
 }
 
 fn count_label(label: &str, count: u32) -> String {
@@ -978,44 +1042,40 @@ const HISTORY_HEADER: f32 = 32.0;
 const HISTORY_ROW: f32 = 26.0;
 /// Horizontal distance between graph lanes.
 const LANE: f32 = 12.0;
-/// Lanes beyond this many are drawn but not given room.
-const MAX_LANES: usize = 6;
 
-/// The recent commits, with the lines of the branch graph, between the
-/// changes and the commit box. Folds down to its heading.
-fn history(ui: &mut Ui, repo: &Repo, cmds: &mut Vec<Cmd>) {
-    if !repo.history_open {
+/// The recent commits with the lines of the branch graph, under Pull, Push
+/// and Fetch. Folded down to its heading until opened.
+fn history(ui: &mut Ui, repo: &Repo, settings: &Settings, cmds: &mut Vec<Cmd>) {
+    let open = settings.history_open;
+    if !open {
         Panel::bottom("history_closed")
             .exact_size(HISTORY_HEADER)
             .frame(Frame::new())
             .show_separator_line(false)
-            .show(ui, |ui| history_header(ui, repo, cmds));
+            .show(ui, |ui| history_header(ui, repo, open, cmds));
         return;
     }
     let room = ui.available_height();
+    let min = HISTORY_HEADER + HISTORY_ROW * 3.0;
     Panel::bottom("history_open")
         .resizable(true)
-        .default_size((room * 0.45).max(160.0))
-        .min_size(HISTORY_HEADER + HISTORY_ROW * 3.0)
-        .max_size((room - 80.0).max(HISTORY_HEADER + HISTORY_ROW * 3.0))
+        .default_size((room * 0.4).max(min))
+        .min_size(min)
+        .max_size((room - 200.0).max(min))
         .frame(Frame::new())
         .show_separator_line(false)
         .show(ui, |ui| {
-            history_header(ui, repo, cmds);
+            history_header(ui, repo, open, cmds);
             history_list(ui, repo, cmds);
         });
 }
 
-fn history_header(ui: &mut Ui, repo: &Repo, cmds: &mut Vec<Cmd>) {
+fn history_header(ui: &mut Ui, repo: &Repo, open: bool, cmds: &mut Vec<Cmd>) {
     let (rect, response) =
         ui.allocate_exact_size(vec2(ui.available_width(), HISTORY_HEADER), Sense::click());
     let response = response
         .on_hover_cursor(CursorIcon::PointingHand)
-        .on_hover_text(if repo.history_open {
-            "Hide commits"
-        } else {
-            "Show commits"
-        });
+        .on_hover_text(if open { "Hide commits" } else { "Show commits" });
     ui.painter().hline(
         rect.x_range(),
         rect.top() + 0.5,
@@ -1027,7 +1087,7 @@ fn history_header(ui: &mut Ui, repo: &Repo, cmds: &mut Vec<Cmd>) {
     paint_icon(
         ui,
         pos2(row.left() + 10.0, mid),
-        if repo.history_open {
+        if open {
             icon::CARET_DOWN
         } else {
             icon::CARET_RIGHT
@@ -1069,6 +1129,87 @@ fn lane_color(lane: usize) -> Color32 {
     colors[lane % colors.len()]
 }
 
+/// What kind of ref a name from `git log --decorate` is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RefKind {
+    /// The branch checked out right now.
+    Current,
+    Local,
+    Remote,
+    Tag,
+}
+
+fn ref_kind<'a>(name: &'a str, current: Option<&str>) -> (RefKind, &'a str) {
+    if let Some(tag) = name.strip_prefix("tag: ") {
+        (RefKind::Tag, tag)
+    } else if Some(name) == current {
+        (RefKind::Current, name)
+    } else if name.contains('/') && !name.starts_with("refs/") {
+        // A local branch can have a slash too; remote ones start with a remote's name.
+        (RefKind::Remote, name)
+    } else {
+        (RefKind::Local, name)
+    }
+}
+
+/// A branch or tag as a small pill with an icon, ending at `right` (or, with
+/// `from_left`, starting at it). Returns its width; draws nothing when
+/// `max_width` is too small for anything readable.
+fn ref_pill(
+    ui: &Ui,
+    edge: f32,
+    from_left: bool,
+    mid: f32,
+    kind: RefKind,
+    name: &str,
+    max_width: f32,
+) -> f32 {
+    let (glyph, fill, stroke, text) = match kind {
+        RefKind::Current => (
+            icon::GIT_BRANCH,
+            theme::accent(),
+            Stroke::NONE,
+            theme::on_accent(),
+        ),
+        RefKind::Local => (
+            icon::GIT_BRANCH,
+            theme::overlay(16),
+            Stroke::NONE,
+            theme::text(),
+        ),
+        RefKind::Remote => (
+            icon::CLOUD,
+            Color32::TRANSPARENT,
+            Stroke::new(1.0, theme::border_strong()),
+            theme::text_secondary(),
+        ),
+        RefKind::Tag => (
+            icon::TAG,
+            Color32::TRANSPARENT,
+            Stroke::new(1.0, theme::border_strong()),
+            theme::yellow(),
+        ),
+    };
+    let chrome = 6.0 + 12.0 + 4.0 + 7.0;
+    if max_width < chrome + 24.0 {
+        return 0.0;
+    }
+    let galley = elided(ui, name, theme::medium_font(11.0), text, max_width - chrome);
+    let width = chrome + galley.size().x;
+    let left = if from_left { edge } else { edge - width };
+    let pill = Rect::from_min_size(pos2(left, mid - 9.0), vec2(width, 18.0));
+    ui.painter().rect(
+        pill,
+        CornerRadius::same(9),
+        fill,
+        stroke,
+        egui::StrokeKind::Inside,
+    );
+    paint_icon(ui, pos2(pill.left() + 12.0, mid), glyph, 11.0, text);
+    paint_galley(ui, pill.left() + 22.0, mid, galley);
+    width
+}
+
 fn history_list(ui: &mut Ui, repo: &Repo, cmds: &mut Vec<Cmd>) {
     if repo.commits.is_empty() {
         ui.add_space(10.0);
@@ -1082,21 +1223,17 @@ fn history_list(ui: &mut Ui, repo: &Repo, cmds: &mut Vec<Cmd>) {
         });
         return;
     }
-    let lanes = repo
-        .graph
-        .iter()
-        .map(crate::graph::Row::width)
-        .max()
-        .unwrap_or(1)
-        .min(MAX_LANES);
     let selected = match &repo.view {
         View::Commit(view) => Some(view.commit.hash.as_str()),
         _ => None,
     };
     let head = repo.status.head.as_deref();
+    let current = repo.status.branch.as_deref();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64);
+    let panel_right = ui.max_rect().right();
+    let mut hovered_row: Option<(usize, Rect)> = None;
 
     virtual_rows(
         ui,
@@ -1105,7 +1242,7 @@ fn history_list(ui: &mut Ui, repo: &Repo, cmds: &mut Vec<Cmd>) {
         HISTORY_ROW,
         repo.commits.len(),
         0.0,
-        2.0,
+        4.0,
         |ui, i, rect| {
             let commit = &repo.commits[i];
             let row = rect.shrink2(vec2(PAD, 0.0));
@@ -1118,91 +1255,342 @@ fn history_list(ui: &mut Ui, repo: &Repo, cmds: &mut Vec<Cmd>) {
                 response.hovered(),
                 selected == Some(commit.hash.as_str()),
             );
-            let graph_left = row.left() + 10.0;
+            let graph_left = row.left() + 6.0;
+            // Text starts after this row's own lanes, as in VS Code.
+            let mut lanes = 1;
             if let Some(graph) = repo.graph.get(i) {
                 let is_head = head.is_some_and(|h| commit.hash.starts_with(h));
                 paint_graph(ui, rect, graph_left, graph, commit, is_head);
+                lanes = graph.width();
             }
-            let x = graph_left + LANE * lanes as f32 + 4.0;
+            let x = graph_left + LANE * lanes as f32 + 6.0;
             let mid = row.center().y;
 
-            // The first branch or tag here, as a small pill on the right.
+            // Branches and tags on the right, as many as fit in half the row.
             let mut right = row.right() - 6.0;
-            if let Some(name) = commit.refs.first() {
-                let more = commit.refs.len() - 1;
-                let label = if more > 0 {
-                    format!("{name} +{more}")
-                } else {
-                    name.clone()
-                };
-                let local = !name.contains('/') && !name.starts_with("tag: ");
-                let color = if local {
-                    theme::text()
-                } else {
-                    theme::text_muted()
-                };
-                let max = ((row.right() - x) * 0.45).max(30.0);
-                let galley = elided(ui, &label, theme::medium_font(11.0), color, max - 12.0);
-                let pill = Rect::from_min_size(
-                    pos2(right - galley.size().x - 12.0, mid - 9.0),
-                    vec2(galley.size().x + 12.0, 18.0),
-                );
-                ui.painter().rect(
-                    pill,
-                    CornerRadius::same(9),
-                    if local {
-                        theme::overlay(14)
-                    } else {
-                        Color32::TRANSPARENT
-                    },
-                    Stroke::new(1.0, theme::border_strong()),
-                    egui::StrokeKind::Inside,
-                );
-                paint_galley(ui, pill.left() + 6.0, mid, galley);
-                right = pill.left() - 6.0;
+            let budget = ((right - x) * 0.5).max(0.0);
+            let mut used = 0.0;
+            let refs: Vec<_> = commit.refs.iter().map(|r| ref_kind(r, current)).collect();
+            let mut shown = 0;
+            for &(kind, name) in &refs {
+                let remaining = refs.len() - shown - 1;
+                let reserve = if remaining > 0 { 26.0 } else { 0.0 };
+                let width = ref_pill(ui, right, false, mid, kind, name, budget - used - reserve);
+                if width == 0.0 {
+                    break;
+                }
+                right -= width + 4.0;
+                used += width + 4.0;
+                shown += 1;
+                if used > budget * 0.75 {
+                    break;
+                }
             }
+            if shown < refs.len() {
+                let more = ui.painter().layout_no_wrap(
+                    format!("+{}", refs.len() - shown),
+                    theme::medium_font(11.0),
+                    theme::text_muted(),
+                );
+                right -= more.size().x;
+                paint_galley(ui, right, mid, more);
+                right -= 6.0;
+            }
+
             let color = if commit.incoming {
                 theme::text_muted()
             } else {
                 theme::text()
             };
             let subject = elided(ui, &commit.subject, theme::ui_font(12.5), color, right - x);
-            paint_galley(ui, x, mid, subject);
+            let used = paint_galley(ui, x, mid, subject);
+            // The author, faintly, after the subject when there is room.
+            let author_x = x + used + 8.0;
+            if right - author_x > 40.0 {
+                let author = elided(
+                    ui,
+                    &commit.author,
+                    theme::ui_font(12.0),
+                    theme::text_faint(),
+                    right - author_x,
+                );
+                paint_galley(ui, author_x, mid, author);
+            }
 
-            let response = response.on_hover_ui(|ui| {
-                ui.set_max_width(320.0);
-                ui.label(
-                    egui::RichText::new(&commit.subject)
-                        .font(theme::medium_font(12.5))
-                        .color(theme::text()),
-                );
-                let mut detail = format!(
-                    "{} · {} · {}",
-                    commit.short,
-                    commit.author,
-                    super::content::time_ago(commit.time, now)
-                );
-                if commit.incoming {
-                    detail.push_str(" · not pulled yet");
+            if response.hovered() {
+                hovered_row = Some((i, row));
+                if !repo.commit_info.contains_key(&commit.hash) {
+                    cmds.push(Cmd::LoadCommitInfo(commit.hash.clone()));
                 }
-                ui.label(
-                    egui::RichText::new(detail)
-                        .font(theme::ui_font(12.0))
-                        .color(theme::text_muted()),
-                );
-                if !commit.refs.is_empty() {
-                    ui.label(
-                        egui::RichText::new(commit.refs.join(", "))
-                            .font(theme::ui_font(12.0))
-                            .color(theme::text_secondary()),
-                    );
-                }
-            });
+            }
             if response.clicked() {
                 cmds.push(Cmd::OpenCommit(commit.hash.clone()));
             }
         },
     );
+    hover_card(ui, repo, hovered_row, panel_right, now);
+}
+
+/// Which commit's card is up, and since when.
+#[derive(Clone, Default)]
+struct CardState {
+    index: usize,
+    row: Option<Rect>,
+    /// When the pointer arrived on the row.
+    since: f64,
+    /// When the pointer was last on the row or the card.
+    seen: f64,
+    card_hovered: bool,
+}
+
+/// Shows a commit's card beside the sidebar once the pointer has rested on
+/// its row for a moment. It stays while the pointer is on the card, so its
+/// buttons can be used.
+fn hover_card(
+    ui: &Ui,
+    repo: &Repo,
+    hovered_row: Option<(usize, Rect)>,
+    panel_right: f32,
+    now: i64,
+) {
+    const DELAY: f64 = 0.35;
+    const GRACE: f64 = 0.3;
+    let id = Id::unique("commit_card");
+    let time = ui.input(|i| i.time);
+    let mut state = ui.data(|d| d.get_temp::<CardState>(id));
+    let on_card = state.as_ref().is_some_and(|s| s.card_hovered);
+    match (hovered_row, state.as_mut()) {
+        (Some((index, row)), Some(state)) if state.index == index => {
+            state.seen = time;
+            state.row = Some(row);
+        }
+        // Another row: its own card, after its own wait. Not while the
+        // pointer is on the card, which can overlap rows.
+        (Some((index, row)), _) if !on_card => {
+            state = Some(CardState {
+                index,
+                row: Some(row),
+                since: time,
+                seen: time,
+                card_hovered: false,
+            });
+        }
+        (_, Some(state)) if on_card => state.seen = time,
+        _ => {}
+    }
+    let Some(mut card) = state else {
+        return;
+    };
+    if time - card.seen > GRACE || card.index >= repo.commits.len() {
+        ui.data_mut(|d| d.remove::<CardState>(id));
+        return;
+    }
+    let waited = time - card.since;
+    if waited < DELAY {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs_f64(DELAY - waited));
+        ui.data_mut(|d| d.insert_temp(id, card));
+        return;
+    }
+    // Keep checking while the pointer travels from the row to the card.
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(100));
+
+    let commit = &repo.commits[card.index];
+    let current = repo.status.branch.as_deref();
+    let refs: Vec<_> = commit.refs.iter().map(|r| ref_kind(r, current)).collect();
+    let top = card.row.map_or(0.0, |r| r.top()) - 6.0;
+    let area = egui::Area::new(id.with("area"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(pos2(panel_right + 6.0, top))
+        .constrain(true)
+        .show(ui.ctx(), |ui| {
+            popup_frame()
+                .inner_margin(Margin::same(12))
+                .show(ui, |ui| commit_card(ui, repo, commit, &refs, now));
+        });
+    card.card_hovered = area.response.contains_pointer();
+    if card.card_hovered {
+        card.seen = time;
+    }
+    ui.data_mut(|d| d.insert_temp(id, card));
+}
+
+/// The card shown when hovering a commit: who, when, the whole message,
+/// what it changed, its branches, and its hash.
+fn commit_card(ui: &mut Ui, repo: &Repo, commit: &Commit, refs: &[(RefKind, &str)], now: i64) {
+    ui.set_width(460.0);
+    ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+    let info = match repo.commit_info.get(&commit.hash) {
+        Some(Some(Ok(info))) => Some(info),
+        _ => None,
+    };
+    let small = |text: String, color: Color32| {
+        egui::RichText::new(text)
+            .font(theme::ui_font(12.5))
+            .color(color)
+    };
+
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(icon::USER)
+                .font(theme::icon_font(13.0))
+                .color(theme::text_muted()),
+        );
+        ui.label(
+            egui::RichText::new(&commit.author)
+                .font(theme::medium_font(12.5))
+                .color(theme::text()),
+        );
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new(icon::CLOCK)
+                .font(theme::icon_font(13.0))
+                .color(theme::text_muted()),
+        );
+        let mut when = super::content::time_ago(commit.time, now);
+        if let Some(info) = info {
+            when.push_str(&format!(" ({})", info.date));
+        }
+        ui.label(small(when, theme::text_secondary()));
+    });
+
+    // The message: the subject, then paragraphs and bullet points.
+    let message = info.map_or(commit.subject.as_str(), |i| i.message.as_str());
+    let mut lines = message.lines();
+    if let Some(subject) = lines.next() {
+        ui.add(
+            Label::new(
+                egui::RichText::new(subject)
+                    .font(theme::medium_font(13.0))
+                    .color(theme::text()),
+            )
+            .wrap(),
+        );
+    }
+    let mut paragraph = String::new();
+    let flush = |ui: &mut Ui, paragraph: &mut String| {
+        if !paragraph.is_empty() {
+            ui.add(Label::new(small(std::mem::take(paragraph), theme::text())).wrap());
+        }
+    };
+    for line in lines {
+        let trimmed = line.trim();
+        let bullet = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "));
+        if trimmed.is_empty() {
+            flush(ui, &mut paragraph);
+        } else if let Some(item) = bullet {
+            flush(ui, &mut paragraph);
+            ui.horizontal_top(|ui| {
+                ui.add_space(4.0);
+                ui.label(small("•".to_owned(), theme::text_muted()));
+                ui.add(Label::new(small(item.to_owned(), theme::text())).wrap());
+            });
+        } else if paragraph.is_empty() {
+            paragraph.push_str(trimmed);
+        } else {
+            // A continued line, maybe of the bullet above: join it on.
+            paragraph.push(' ');
+            paragraph.push_str(trimmed);
+        }
+    }
+    flush(ui, &mut paragraph);
+
+    match repo.commit_info.get(&commit.hash) {
+        Some(Some(Ok(info))) if info.files > 0 => {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                let plural = |n: u32, one: &str, many: &str| {
+                    format!("{n} {}", if n == 1 { one } else { many })
+                };
+                ui.label(small(
+                    format!("{} changed", plural(info.files, "file", "files")),
+                    theme::text_secondary(),
+                ));
+                // As git puts it: a part that is zero is left out.
+                if info.insertions > 0 {
+                    ui.label(small(", ".to_owned(), theme::text_secondary()));
+                    ui.label(small(
+                        plural(info.insertions, "insertion(+)", "insertions(+)"),
+                        theme::green(),
+                    ));
+                }
+                if info.deletions > 0 {
+                    ui.label(small(", ".to_owned(), theme::text_secondary()));
+                    ui.label(small(
+                        plural(info.deletions, "deletion(-)", "deletions(-)"),
+                        theme::red(),
+                    ));
+                }
+            });
+        }
+        None | Some(None) => {
+            ui.label(small("Loading…".to_owned(), theme::text_muted()));
+        }
+        _ => {}
+    }
+
+    if !refs.is_empty() {
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
+        let mut left = rect.left();
+        for &(kind, name) in refs {
+            let room = rect.right() - left;
+            let width = ref_pill(ui, left, true, rect.center().y, kind, name, room);
+            if width == 0.0 {
+                break;
+            }
+            left += width + 6.0;
+        }
+    }
+
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
+    ui.painter().hline(
+        rect.x_range(),
+        rect.center().y,
+        Stroke::new(1.0, theme::border()),
+    );
+    ui.horizontal(|ui| {
+        let copy = ui
+            .add(
+                egui::Button::new(
+                    egui::RichText::new(format!("{}  {}", icon::COPY, commit.short))
+                        .font(theme::ui_font(12.5))
+                        .color(theme::text_secondary()),
+                )
+                .frame(false),
+            )
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text("Copy the full hash");
+        if copy.clicked() {
+            ui.ctx().copy_text(commit.hash.clone());
+        }
+        if let Some(slug) = &repo.github {
+            ui.add_space(8.0);
+            let open = ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new(format!("{}  Open on GitHub", icon::GITHUB))
+                            .font(theme::ui_font(12.5))
+                            .color(theme::text_secondary()),
+                    )
+                    .frame(false),
+                )
+                .on_hover_cursor(CursorIcon::PointingHand);
+            if open.clicked() {
+                open_url(
+                    ui,
+                    format!("https://github.com/{slug}/commit/{}", commit.hash),
+                );
+            }
+        }
+    });
+}
+
+/// Opens a web address in the browser.
+fn open_url(ui: &Ui, url: String) {
+    ui.ctx().open_url(egui::OpenUrl::new_tab(url));
 }
 
 /// One commit's share of the graph: the lines through its row, then its dot.
@@ -1400,8 +1788,15 @@ fn branch_picker(ui: &mut Ui, rect: Rect, repo: &mut Repo, cmds: &mut Vec<Cmd>) 
             ui.set_width(rect.width().max(260.0));
             ui.spacing_mut().item_spacing.y = 0.0;
 
+            // The popup's own margin is above the field already; matching
+            // space below puts the text in the middle of its strip.
             let edit = Frame::new()
-                .inner_margin(Margin::symmetric(8, 6))
+                .inner_margin(Margin {
+                    left: 8,
+                    right: 8,
+                    top: 0,
+                    bottom: 4,
+                })
                 .show(ui, |ui| {
                     ui.add(
                         TextEdit::singleline(&mut repo.branch_filter)

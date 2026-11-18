@@ -558,6 +558,78 @@ fn mark_incoming(commits: &mut [Commit], head: &str) {
     }
 }
 
+/// What the hover card for a commit shows beyond its row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitInfo {
+    /// "November 18, 2026 at 8:46 PM", in local time.
+    pub date: String,
+    pub message: String,
+    pub files: u32,
+    pub insertions: u32,
+    pub deletions: u32,
+}
+
+pub fn commit_info(root: &Path, hash: &str) -> Result<CommitInfo> {
+    let out = run_text(
+        root,
+        &[
+            "show",
+            "--shortstat",
+            "--diff-merges=first-parent",
+            "--date=format-local:%B %d, %Y at %I:%M %p",
+            "--format=%ad%x00%B%x00",
+            "--end-of-options",
+            hash,
+        ],
+    )?;
+    let mut parts = out.splitn(3, '\0');
+    let date = tidy_date(parts.next().unwrap_or(""));
+    let message = parts.next().unwrap_or("").trim().to_owned();
+    let (files, insertions, deletions) = parse_shortstat(parts.next().unwrap_or(""));
+    Ok(CommitInfo {
+        date,
+        message,
+        files,
+        insertions,
+        deletions,
+    })
+}
+
+/// "November 08, 2026 at 08:46 PM" -> "November 8, 2026 at 8:46 PM". Not
+/// every system's date formatting can drop leading zeros by itself.
+fn tidy_date(date: &str) -> String {
+    let date = date.trim();
+    let mut out = String::with_capacity(date.len());
+    let mut previous = ' ';
+    let mut chars = date.chars().peekable();
+    while let Some(c) = chars.next() {
+        let starts_number = previous == ' ' && c == '0';
+        if starts_number && chars.peek().is_some_and(char::is_ascii_digit) {
+            previous = c;
+            continue;
+        }
+        out.push(c);
+        previous = c;
+    }
+    out
+}
+
+/// " 3 files changed, 10 insertions(+), 2 deletions(-)"
+fn parse_shortstat(text: &str) -> (u32, u32, u32) {
+    let (mut files, mut insertions, mut deletions) = (0, 0, 0);
+    for part in text.trim().split(", ") {
+        let mut words = part.split_whitespace();
+        let number = words.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        match words.next() {
+            Some(w) if w.starts_with("file") => files = number,
+            Some(w) if w.starts_with("insertion") => insertions = number,
+            Some(w) if w.starts_with("deletion") => deletions = number,
+            _ => {}
+        }
+    }
+    (files, insertions, deletions)
+}
+
 /// Changes whenever the history shown would: every branch and tag and the
 /// commit it points at, and HEAD.
 pub fn history_key(root: &Path) -> Option<String> {
@@ -1268,6 +1340,24 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
         assert_eq!(by("Local work").parents, [by("First").hash.clone()]);
         assert_eq!(by("First").author, "Test");
         assert!(by("First").time > 0);
+
+        let info = commit_info(root, &by("Local work").hash).unwrap();
+        assert_eq!(info.message, "Local work");
+        assert_eq!((info.files, info.insertions, info.deletions), (1, 1, 0));
+        assert!(info.date.contains(" at "), "{}", info.date);
+        assert_eq!(
+            tidy_date("November 08, 2026 at 08:46 PM"),
+            "November 8, 2026 at 8:46 PM"
+        );
+        assert_eq!(
+            tidy_date("May 10, 2026 at 10:05 AM"),
+            "May 10, 2026 at 10:05 AM"
+        );
+        assert_eq!(
+            parse_shortstat(" 23 files changed, 3230 insertions(+), 10 deletions(-)\n"),
+            (23, 3230, 10)
+        );
+        assert_eq!(parse_shortstat(" 1 file changed, 1 deletion(-)"), (1, 0, 1));
 
         let (message, patch) = show_commit(root, &by("Local work").hash).unwrap();
         assert_eq!(message, "Local work");

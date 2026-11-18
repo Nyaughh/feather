@@ -277,7 +277,6 @@ pub fn code_font() -> FontId {
 /// Phosphor icon codepoints (regular weight).
 pub mod icon {
     pub const CARET_RIGHT: &str = "\u{E13A}";
-    pub const CARET_LEFT: &str = "\u{E138}";
     pub const CARET_DOWN: &str = "\u{E136}";
     pub const CARET_UP_DOWN: &str = "\u{E140}";
     pub const FOLDER: &str = "\u{E24A}";
@@ -305,10 +304,12 @@ pub mod icon {
     pub const SEARCH: &str = "\u{E30C}";
     pub const TERMINAL: &str = "\u{EAE8}";
     pub const MORE: &str = "\u{E1FE}";
-    pub const STASH: &str = "\u{E00C}";
-    pub const TRASH: &str = "\u{E4A6}";
-    pub const UNDO: &str = "\u{E084}";
-    pub const PENCIL: &str = "\u{E3B4}";
+    pub const CLOUD: &str = "\u{E1AA}";
+    pub const TAG: &str = "\u{E478}";
+    pub const CLOCK: &str = "\u{E19A}";
+    pub const COPY: &str = "\u{E1CA}";
+    pub const GITHUB: &str = "\u{E576}";
+    pub const USER: &str = "\u{E4C2}";
 }
 
 /// Loads the fonts. Call once, at startup.

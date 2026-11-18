@@ -717,8 +717,6 @@ dependencies = [
 [[package]]
 name = "egui_commonmark_backend"
 version = "0.26.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7ea83d05053e960b4756c0d550ca9ad23632e3d2e811f7822eb9b6b76dcd02f"
 dependencies = [
  "egui",
  "egui_extras",
@@ -922,7 +920,7 @@ checksum = "b97b65636e5b9ef369943878ac74335ba1c55c1cb6adbf1e2c293c624248d693"
 
 [[package]]
 name = "feather"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "eframe",
  "egui",

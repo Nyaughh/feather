@@ -425,8 +425,15 @@ pub fn quick_open(ctx: &egui::Context, repo: &mut Repo, cmds: &mut Vec<Cmd>) {
         .show(ctx, |ui| {
             ui.set_width(560.0_f32.min(ctx.content_rect().width() - 80.0));
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+            // The modal's own margin is above the field already; matching
+            // space below puts the text in the middle of its strip.
             Frame::new()
-                .inner_margin(Margin::symmetric(8, 6))
+                .inner_margin(Margin {
+                    left: 8,
+                    right: 8,
+                    top: 0,
+                    bottom: 6,
+                })
                 .show(ui, |ui| {
                     let field = ui.add(
                         TextEdit::singleline(&mut state.query)
