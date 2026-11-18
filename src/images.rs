@@ -474,19 +474,22 @@ mod tests {
             root: dir.clone(),
             github: Some("nyaughh/feather".to_owned()),
         };
+        // Windows joins paths with a backslash and opens either kind, so the
+        // two are the same address there.
         let root = dir.display().to_string();
-        let file = |rel: &str| format!("file://{root}/{rel}");
+        let file = |rel: &str| format!("file://{root}/{rel}").replace('\\', "/");
+        let resolve = |uri: &str| resolve(uri).replace('\\', "/");
 
         // Plain relative paths are left alone.
-        assert_eq!(scope.resolve(&file("docs/logo.png")), file("docs/logo.png"));
+        assert_eq!(resolve(&file("docs/logo.png")), file("docs/logo.png"));
         // Query strings are dropped.
         assert_eq!(
-            scope.resolve(&file("docs/logo.png?raw=true")),
+            resolve(&file("docs/logo.png?raw=true")),
             file("docs/logo.png")
         );
         // "/docs/logo.png" written in docs/guide.md means the repository's docs folder.
         assert_eq!(
-            scope.resolve(&format!("file://{root}/docs//docs/logo.png")),
+            resolve(&format!("file://{root}/docs//docs/logo.png")),
             file("docs/logo.png")
         );
         // Links to this repository on GitHub come from disk, whatever the branch.
@@ -495,10 +498,10 @@ mod tests {
             "https://github.com/Nyaughh/feather/raw/feat/new-ui/docs/logo.png?raw=true",
             "https://raw.githubusercontent.com/nyaughh/feather/refs/heads/main/docs/logo.png",
         ] {
-            assert_eq!(scope.resolve(link), file("docs/logo.png"), "{link}");
+            assert_eq!(resolve(link), file("docs/logo.png"), "{link}");
         }
         assert_eq!(
-            scope.resolve("https://github.com/Nyaughh/feather/blob/main/docs/my%20shots/a.png"),
+            resolve("https://github.com/Nyaughh/feather/blob/main/docs/my%20shots/a.png"),
             file("docs/my shots/a.png")
         );
         // Someone else's file page becomes the file.
