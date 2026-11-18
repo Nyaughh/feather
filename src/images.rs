@@ -478,7 +478,7 @@ mod tests {
         // two are the same address there.
         let root = dir.display().to_string();
         let file = |rel: &str| format!("file://{root}/{rel}").replace('\\', "/");
-        let resolve = |uri: &str| resolve(uri).replace('\\', "/");
+        let resolve = |uri: &str| scope.resolve(uri).replace('\\', "/");
 
         // Plain relative paths are left alone.
         assert_eq!(resolve(&file("docs/logo.png")), file("docs/logo.png"));
