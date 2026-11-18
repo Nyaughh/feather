@@ -303,6 +303,11 @@ pub mod icon {
     pub const INFO: &str = "\u{E2CE}";
     pub const SEARCH: &str = "\u{E30C}";
     pub const TERMINAL: &str = "\u{EAE8}";
+    pub const MORE: &str = "\u{E1FE}";
+    pub const STASH: &str = "\u{E00C}";
+    pub const TRASH: &str = "\u{E4A6}";
+    pub const UNDO: &str = "\u{E084}";
+    pub const PENCIL: &str = "\u{E3B4}";
 }
 
 /// Loads the fonts. Call once, at startup.

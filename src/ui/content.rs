@@ -1005,7 +1005,7 @@ fn markdown_view(
 const STATUS_HEIGHT: f32 = 26.0;
 
 /// "3 days ago", from a Unix timestamp.
-fn time_ago(then: i64, now: i64) -> String {
+pub(super) fn time_ago(then: i64, now: i64) -> String {
     let seconds = (now - then).max(0);
     let (count, unit) = match seconds {
         0..60 => return "just now".to_owned(),

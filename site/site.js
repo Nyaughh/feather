@@ -148,7 +148,9 @@ function showReleases([latest, ...older]) {
   for (const link of document.querySelectorAll('[data-asset]')) {
     const asset = latest.assets[link.dataset.asset];
     if (!asset) continue;
-    link.href = asset.url;
+    // The macOS button leads to the install steps: on a Mac the zip itself is
+    // blocked when a browser downloads it.
+    if (!('guide' in link.dataset)) link.href = asset.url;
     const size = link.querySelector('.size');
     if (size) size.textContent = megabytes(asset.size);
   }

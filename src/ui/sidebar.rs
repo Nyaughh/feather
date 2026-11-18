@@ -13,7 +13,7 @@ use super::widgets::{
     paint_row_bg, popup_frame,
 };
 use crate::app::{Cmd, Repo, Tab, View};
-use crate::git::{Branch, Change, ChangeKind};
+use crate::git::{Branch, Change, ChangeKind, Stash};
 use crate::settings::Settings;
 use crate::theme::{self, ROW_HEIGHT, icon};
 use crate::worker::Action;
@@ -360,6 +360,8 @@ fn files(ui: &mut Ui, repo: &mut Repo, cmds: &mut Vec<Cmd>) {
 enum GitRow {
     Header { staged: bool },
     Change { staged: bool, index: usize },
+    StashHeader,
+    Stash(usize),
 }
 
 fn changes(ui: &mut Ui, repo: &Repo, cmds: &mut Vec<Cmd>) {
@@ -367,7 +369,7 @@ fn changes(ui: &mut Ui, repo: &Repo, cmds: &mut Vec<Cmd>) {
         return;
     }
     let status = &repo.status;
-    if status.change_count() == 0 {
+    if status.change_count() == 0 && repo.stashes.is_empty() {
         empty_state(
             ui,
             icon::CHECK,
@@ -377,13 +379,20 @@ fn changes(ui: &mut Ui, repo: &Repo, cmds: &mut Vec<Cmd>) {
         return;
     }
 
-    let mut rows = Vec::with_capacity(status.change_count() + 2);
+    let mut rows = Vec::with_capacity(status.change_count() + repo.stashes.len() + 3);
     for (staged, list) in [(true, &status.staged), (false, &status.unstaged)] {
         if !list.is_empty() {
             rows.push(GitRow::Header { staged });
             rows.extend((0..list.len()).map(|index| GitRow::Change { staged, index }));
         }
     }
+    if !repo.stashes.is_empty() {
+        rows.push(GitRow::StashHeader);
+        rows.extend((0..repo.stashes.len()).map(GitRow::Stash));
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
     let selected = match &repo.view {
         View::Diff(view) => Some((view.change.path.as_str(), view.staged)),
         _ => None,
@@ -408,19 +417,7 @@ fn changes(ui: &mut Ui, repo: &Repo, cmds: &mut Vec<Cmd>) {
                         ("Changes", status.unstaged.len())
                     };
                     let mid = rect.center().y + 2.0;
-                    let galley = ui.painter().layout_no_wrap(
-                        label.to_owned(),
-                        theme::medium_font(11.5),
-                        theme::text_muted(),
-                    );
-                    let w = paint_galley(ui, rect.left() + 8.0, mid, galley);
-                    ui.painter().text(
-                        pos2(rect.left() + 8.0 + w + 6.0, mid),
-                        Align2::LEFT_CENTER,
-                        count.to_string(),
-                        theme::ui_font(11.5),
-                        theme::text_faint(),
-                    );
+                    list_header(ui, rect, label, count);
                     let slot =
                         Rect::from_center_size(pos2(rect.right() - 14.0, mid), vec2(22.0, 22.0));
                     let id = ui.scope_id().with(("all", staged));
@@ -457,9 +454,112 @@ fn changes(ui: &mut Ui, repo: &Repo, cmds: &mut Vec<Cmd>) {
                     let is_selected = selected == Some((change.path.as_str(), staged));
                     change_row(ui, rect, i, change, staged, is_selected, idle, cmds);
                 }
+                GitRow::StashHeader => list_header(ui, rect, "Stashes", repo.stashes.len()),
+                GitRow::Stash(index) => {
+                    stash_row(ui, rect, &repo.stashes[index], now, idle, cmds);
+                }
             }
         },
     );
+}
+
+/// "Changes 6": the small heading above each group in the Git tab.
+fn list_header(ui: &Ui, rect: Rect, label: &str, count: usize) {
+    let mid = rect.center().y + 2.0;
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        theme::medium_font(11.5),
+        theme::text_muted(),
+    );
+    let w = paint_galley(ui, rect.left() + 8.0, mid, galley);
+    ui.painter().text(
+        pos2(rect.left() + 8.0 + w + 6.0, mid),
+        Align2::LEFT_CENTER,
+        count.to_string(),
+        theme::ui_font(11.5),
+        theme::text_faint(),
+    );
+}
+
+/// One row of a menu of actions. A disabled one is dimmed and says why.
+fn action_item(ui: &mut Ui, glyph: &str, label: &str, enabled: bool, why_not: &str) -> bool {
+    let width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click());
+    let mid = rect.center().y;
+    paint_row_bg(ui, rect, enabled && response.hovered(), false);
+    let (text, glyph_color) = if enabled {
+        (theme::text(), theme::text_secondary())
+    } else {
+        (theme::text_faint(), theme::text_faint())
+    };
+    paint_icon(ui, pos2(rect.left() + 16.0, mid), glyph, 14.0, glyph_color);
+    let label = elided(ui, label, theme::ui_font(13.0), text, rect.width() - 40.0);
+    paint_galley(ui, rect.left() + 32.0, mid, label);
+    if enabled {
+        response.on_hover_cursor(CursorIcon::PointingHand).clicked()
+    } else {
+        response.on_hover_text(why_not);
+        false
+    }
+}
+
+/// A set of changes that was put aside. Clicking it offers to bring it back.
+fn stash_row(ui: &mut Ui, rect: Rect, stash: &Stash, now: i64, idle: bool, cmds: &mut Vec<Cmd>) {
+    let response = ui
+        .interact(
+            rect,
+            ui.scope_id().with(("stash", stash.index)),
+            Sense::click(),
+        )
+        .on_hover_cursor(CursorIcon::PointingHand);
+    paint_row_bg(
+        ui,
+        rect,
+        response.hovered() || Popup::is_id_open(ui.ctx(), Popup::default_response_id(&response)),
+        false,
+    );
+    let mid = rect.center().y;
+    paint_icon(
+        ui,
+        pos2(rect.left() + 15.0, mid),
+        icon::STASH,
+        14.0,
+        theme::text_secondary(),
+    );
+    let age = ui.painter().layout_no_wrap(
+        super::content::time_ago(stash.time, now),
+        theme::ui_font(11.5),
+        theme::text_muted(),
+    );
+    let age_x = rect.right() - 8.0 - age.size().x;
+    paint_galley(ui, age_x, mid + 0.5, age);
+    let x = rect.left() + 30.0;
+    let label = elided(
+        ui,
+        &stash.label,
+        theme::ui_font(13.0),
+        theme::text(),
+        age_x - 8.0 - x,
+    );
+    paint_galley(ui, x, mid, label);
+
+    Popup::menu(&response)
+        .frame(popup_frame())
+        .gap(2.0)
+        .show(|ui| {
+            ui.set_width(230.0);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let busy = "Wait for the current git action to finish";
+            if action_item(ui, icon::ARROW_UP, "Apply and remove", idle, busy) {
+                cmds.push(Cmd::Act(Action::StashPop(stash.index)));
+            }
+            if action_item(ui, icon::CHECK, "Apply and keep", idle, busy) {
+                cmds.push(Cmd::Act(Action::StashApply(stash.index)));
+            }
+            if action_item(ui, icon::TRASH, "Delete", idle, busy) {
+                cmds.push(Cmd::AskDropStash(stash.clone()));
+            }
+        });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -598,13 +698,6 @@ fn commit_box(ui: &mut Ui, repo: &mut Repo, cmds: &mut Vec<Cmd>) {
         egui::Modifiers::COMMAND,
         egui::Key::Enter,
     ));
-    let commit = button(
-        ui,
-        ButtonKind::Primary,
-        &label,
-        Some(width),
-        repo.can_commit(),
-    );
     let hint = if staged == 0 {
         "Stage changes to commit them".to_owned()
     } else if repo.commit_message.trim().is_empty() {
@@ -612,9 +705,21 @@ fn commit_box(ui: &mut Ui, repo: &mut Repo, cmds: &mut Vec<Cmd>) {
     } else {
         format!("Commit staged changes ({shortcut})")
     };
-    if commit.on_hover_text(hint).clicked() {
-        cmds.push(Cmd::Commit);
-    }
+    const MORE: f32 = 30.0;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let commit = button(
+            ui,
+            ButtonKind::Primary,
+            &label,
+            Some(width - MORE - 4.0),
+            repo.can_commit(),
+        );
+        if commit.on_hover_text(hint).clicked() {
+            cmds.push(Cmd::Commit);
+        }
+        more_actions(ui, repo, MORE, cmds);
+    });
 
     // Remote actions.
     let idle = repo.busy.is_none();
@@ -652,6 +757,76 @@ fn commit_box(ui: &mut Ui, repo: &mut Repo, cmds: &mut Vec<Cmd>) {
             cmds.push(Cmd::Act(Action::Fetch));
         }
     });
+}
+
+/// The "..." beside Commit: the things done to changes and commits less often.
+fn more_actions(ui: &mut Ui, repo: &Repo, size: f32, cmds: &mut Vec<Cmd>) {
+    let (rect, response) = ui.allocate_exact_size(vec2(size, 30.0), Sense::click());
+    let response = response
+        .on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text("Stash, amend, undo");
+    let open = Popup::is_id_open(ui.ctx(), Popup::default_response_id(&response));
+    ui.painter().rect(
+        rect,
+        CornerRadius::same(theme::radius()),
+        theme::overlay(if response.hovered() || open { 20 } else { 10 }),
+        Stroke::new(1.0, theme::border_strong()),
+        egui::StrokeKind::Inside,
+    );
+    paint_icon(ui, rect.center(), icon::MORE, 16.0, theme::text());
+
+    let idle = repo.busy.is_none();
+    let has_changes = repo.status.change_count() > 0;
+    let rewritable = repo.can_rewrite_last_commit();
+    let why_not_rewrite = if !idle {
+        "Wait for the current git action to finish"
+    } else if repo.status.head.is_none() {
+        "There is no commit yet"
+    } else {
+        "The last commit is already pushed"
+    };
+    let amend_has_something =
+        !repo.status.staged.is_empty() || !repo.commit_message.trim().is_empty();
+
+    Popup::menu(&response)
+        .frame(popup_frame())
+        .align(RectAlign::TOP_END)
+        .gap(4.0)
+        .show(|ui| {
+            ui.set_width(230.0);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            if action_item(
+                ui,
+                icon::STASH,
+                "Stash changes",
+                idle && has_changes,
+                "There are no changes to stash",
+            ) {
+                cmds.push(Cmd::Act(Action::Stash));
+            }
+            if action_item(
+                ui,
+                icon::PENCIL,
+                "Amend last commit",
+                rewritable && amend_has_something,
+                if rewritable {
+                    "Stage changes or write a new message to amend with"
+                } else {
+                    why_not_rewrite
+                },
+            ) {
+                cmds.push(Cmd::Amend);
+            }
+            if action_item(
+                ui,
+                icon::UNDO,
+                "Undo last commit",
+                rewritable,
+                why_not_rewrite,
+            ) {
+                cmds.push(Cmd::Act(Action::UndoCommit));
+            }
+        });
 }
 
 fn count_label(label: &str, count: u32) -> String {

@@ -187,7 +187,25 @@ pub fn status(root: &Path) -> Result<Status> {
             "--ignored=matching",
         ],
     )?;
-    Ok(parse_status(&out))
+    let mut status = parse_status(&out);
+    // A worktree kept inside this folder is a checkout of this same
+    // repository, not something to stage, commit or throw away.
+    status
+        .unstaged
+        .retain(|change| !is_linked_worktree(root, change));
+    Ok(status)
+}
+
+/// Whether an untracked entry is one of this repository's own worktrees.
+/// Git lists a folder holding another checkout as `name/`.
+fn is_linked_worktree(root: &Path, change: &Change) -> bool {
+    if change.kind != ChangeKind::Untracked || !change.path.ends_with('/') {
+        return false;
+    }
+    // A linked worktree has a `.git` file pointing into `.git/worktrees/`.
+    std::fs::read_to_string(root.join(&change.path).join(".git")).is_ok_and(|pointer| {
+        pointer.starts_with("gitdir:") && pointer.replace('\\', "/").contains("/worktrees/")
+    })
 }
 
 fn parse_status(out: &[u8]) -> Status {
@@ -353,7 +371,14 @@ pub fn unstage_all(root: &Path) -> Result<()> {
 /// Throw away worktree changes to one file. Untracked files are deleted.
 pub fn discard(root: &Path, change: &Change) -> Result<()> {
     if change.kind == ChangeKind::Untracked {
-        run(root, &["clean", "-f", "-q", "--", &change.path]).map(drop)
+        if change.path.ends_with('/') && root.join(&change.path).join(".git").exists() {
+            // Git would quietly do nothing. Say why instead.
+            return Err(format!(
+                "{} is a git repository of its own, so Feather will not delete it.",
+                change.path.trim_end_matches('/')
+            ));
+        }
+        run(root, &["clean", "-f", "-d", "-q", "--", &change.path]).map(drop)
     } else {
         run(root, &["restore", "--worktree", "--", &change.path]).map(drop)
     }
@@ -393,6 +418,107 @@ pub fn commit(root: &Path, message: &str) -> Result<()> {
     } else {
         "git commit failed".to_owned()
     })
+}
+
+/// Folds what is staged into the last commit. An empty message keeps the
+/// one it has.
+pub fn amend(root: &Path, message: &str) -> Result<()> {
+    if message.is_empty() {
+        run(root, &["commit", "-q", "--amend", "--no-edit"]).map(drop)
+    } else {
+        run(root, &["commit", "-q", "--amend", "-m", message]).map(drop)
+    }
+}
+
+/// Takes back the last commit and leaves what was in it staged.
+pub fn undo_commit(root: &Path) -> Result<()> {
+    if run(root, &["rev-parse", "--verify", "-q", "HEAD~1"]).is_ok() {
+        run(root, &["reset", "-q", "--soft", "HEAD~1"]).map(drop)
+    } else {
+        // The very first commit has nothing before it to go back to.
+        run(root, &["update-ref", "-d", "HEAD"]).map(drop)
+    }
+}
+
+/// The full message of the last commit.
+pub fn last_commit_message(root: &Path) -> Option<String> {
+    let message = run_text(root, &["log", "-1", "--format=%B"]).ok()?;
+    let message = message.trim();
+    (!message.is_empty()).then(|| message.to_owned())
+}
+
+// ── Stashes ────────────────────────────────────────────────────────────────
+
+/// Changes that were set aside with `git stash`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stash {
+    /// Position in the list; 0 is the newest.
+    pub index: usize,
+    /// The name it was given, or a description of where it was made.
+    pub label: String,
+    /// Seconds since the Unix epoch.
+    pub time: i64,
+}
+
+pub fn stashes(root: &Path) -> Result<Vec<Stash>> {
+    let out = run_text(root, &["stash", "list", "--format=%ct%x1f%gs"])?;
+    Ok(out
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let (time, subject) = line.split_once('\u{1f}')?;
+            Some(Stash {
+                index,
+                label: stash_label(subject),
+                time: time.parse().unwrap_or(0),
+            })
+        })
+        .collect())
+}
+
+/// Git describes a stash as "WIP on main: 1a2b3c4 Last commit" or, when it
+/// was given a name, "On main: the name".
+fn stash_label(subject: &str) -> String {
+    if let Some(rest) = subject.strip_prefix("On ")
+        && let Some((_, name)) = rest.split_once(": ")
+    {
+        return name.to_owned();
+    }
+    if let Some(rest) = subject.strip_prefix("WIP on ") {
+        let branch = rest.split_once(':').map_or(rest, |(branch, _)| branch);
+        return format!("Changes on {branch}");
+    }
+    subject.to_owned()
+}
+
+/// Sets every change aside, untracked files included, leaving a clean tree.
+pub fn stash_push(root: &Path) -> Result<()> {
+    let before = stashes(root)?.len();
+    run(root, &["stash", "push", "-q", "--include-untracked"])?;
+    if stashes(root)?.len() == before {
+        return Err("There are no changes to stash.".to_owned());
+    }
+    Ok(())
+}
+
+fn stash_ref(index: usize) -> String {
+    format!("stash@{{{index}}}")
+}
+
+/// Brings a stash's changes back and keeps the stash.
+pub fn stash_apply(root: &Path, index: usize) -> Result<()> {
+    run(root, &["stash", "apply", "-q", &stash_ref(index)]).map(drop)
+}
+
+/// Brings a stash's changes back and removes the stash. If they do not
+/// apply cleanly, git keeps the stash.
+pub fn stash_pop(root: &Path, index: usize) -> Result<()> {
+    run(root, &["stash", "pop", "-q", &stash_ref(index)]).map(drop)
+}
+
+/// Deletes a stash without applying it.
+pub fn stash_drop(root: &Path, index: usize) -> Result<()> {
+    run(root, &["stash", "drop", "-q", &stash_ref(index)]).map(drop)
 }
 
 // ── Branches, worktrees, remotes ───────────────────────────────────────────
@@ -874,6 +1000,127 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
 
     fn paths(list: &[Change]) -> Vec<&str> {
         list.iter().map(|c| c.path.as_str()).collect()
+    }
+
+    #[test]
+    fn stashes_amends_and_undoes_commits() {
+        let repo = TempRepo::new("stash");
+        let root = &repo.0;
+        repo.write("a.txt", "one\n");
+        stage_all(root).unwrap();
+        commit(root, "first").unwrap();
+
+        // Nothing to set aside yet.
+        assert!(stash_push(root).is_err());
+        assert_eq!(stashes(root).unwrap(), []);
+
+        // Edits and new files both go into the stash.
+        repo.write("a.txt", "two\n");
+        repo.write("new.txt", "new\n");
+        stash_push(root).unwrap();
+        assert_eq!(repo.status().change_count(), 0);
+        let list = stashes(root).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(
+            (list[0].index, list[0].label.as_str()),
+            (0, "Changes on main")
+        );
+        assert!(list[0].time > 0);
+
+        // Apply keeps it, pop removes it, drop deletes it unapplied.
+        stash_apply(root, 0).unwrap();
+        assert_eq!(paths(&repo.status().unstaged), ["a.txt", "new.txt"]);
+        assert_eq!(stashes(root).unwrap().len(), 1);
+        discard_all(root).unwrap();
+        stash_pop(root, 0).unwrap();
+        assert_eq!(paths(&repo.status().unstaged), ["a.txt", "new.txt"]);
+        assert_eq!(stashes(root).unwrap(), []);
+        stash_push(root).unwrap();
+        stash_drop(root, 0).unwrap();
+        assert_eq!(stashes(root).unwrap(), []);
+        assert_eq!(repo.status().change_count(), 0);
+
+        assert_eq!(
+            stash_label("On feat/x: half-done parser"),
+            "half-done parser"
+        );
+        assert_eq!(
+            stash_label("WIP on feat/x: 1a2b3c4 Fix: it"),
+            "Changes on feat/x"
+        );
+        assert_eq!(stash_label("something else"), "something else");
+
+        // Amend folds staged changes into the last commit, with or without a new message.
+        repo.write("b.txt", "b\n");
+        stage_all(root).unwrap();
+        amend(root, "").unwrap();
+        assert_eq!(last_commit_message(root).as_deref(), Some("first"));
+        amend(root, "first, reworded").unwrap();
+        assert_eq!(
+            last_commit_message(root).as_deref(),
+            Some("first, reworded")
+        );
+        assert_eq!(
+            run_text(root, &["rev-list", "--count", "HEAD"])
+                .unwrap()
+                .trim(),
+            "1"
+        );
+        assert_eq!(repo.status().change_count(), 0);
+
+        // Undo takes a commit back and leaves its changes staged.
+        repo.write("c.txt", "c\n");
+        stage_all(root).unwrap();
+        commit(root, "second").unwrap();
+        undo_commit(root).unwrap();
+        assert_eq!(
+            last_commit_message(root).as_deref(),
+            Some("first, reworded")
+        );
+        assert_eq!(paths(&repo.status().staged), ["c.txt"]);
+        // Even the first commit can be taken back.
+        undo_commit(root).unwrap();
+        assert_eq!(repo.status().head, None);
+        assert_eq!(paths(&repo.status().staged), ["a.txt", "b.txt", "c.txt"]);
+    }
+
+    #[test]
+    fn hides_its_own_worktrees_and_will_not_delete_other_repositories() {
+        let repo = TempRepo::new("nested");
+        let root = &repo.0;
+        repo.write("a.txt", "one\n");
+        stage_all(root).unwrap();
+        commit(root, "first").unwrap();
+        repo.git(&[
+            "worktree",
+            "add",
+            "-q",
+            ".worktrees/feature",
+            "-b",
+            "feature",
+        ]);
+        repo.write("loose/notes.txt", "untracked\n");
+        // A separate repository that happens to live inside this one.
+        std::fs::create_dir_all(root.join("vendor/lib")).unwrap();
+        run(&root.join("vendor/lib"), &["init", "-q"]).unwrap();
+
+        // The worktree is not a change; the other two are.
+        let status = repo.status();
+        assert_eq!(paths(&status.unstaged), ["loose/notes.txt", "vendor/lib/"]);
+
+        // Discarding the nested repository is refused, out loud.
+        let nested = status.unstaged[1].clone();
+        let refused = discard(root, &nested).unwrap_err();
+        assert!(
+            refused.contains("vendor/lib is a git repository"),
+            "{refused}"
+        );
+        assert!(root.join("vendor/lib/.git").exists());
+        // Discard all leaves both it and the worktree alone.
+        discard_all(root).unwrap();
+        assert!(root.join("vendor/lib/.git").exists());
+        assert!(root.join(".worktrees/feature/a.txt").exists());
+        assert!(!root.join("loose").exists());
     }
 
     #[test]

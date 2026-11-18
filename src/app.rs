@@ -11,7 +11,8 @@ use std::time::Duration;
 use crate::diff::Diff;
 use crate::document::{self, Body, Highlights, LoadedFile, Preview, Span, TextDoc};
 use crate::git::{
-    self, BlameLine, Branch, Change, ChangeKind, SearchOptions, SearchResults, Status, Worktree,
+    self, BlameLine, Branch, Change, ChangeKind, SearchOptions, SearchResults, Stash, Status,
+    Worktree,
 };
 use crate::settings::Settings;
 use crate::terminal::Terminals;
@@ -60,6 +61,10 @@ pub enum Cmd {
     CloseTerminal(usize),
     SelectTerminal(usize),
     AskDiscardAll,
+    AskDropStash(Stash),
+    /// Fold staged changes into the last commit, using the commit box's
+    /// message if it has one.
+    Amend,
     ToggleSidebar,
     ToggleSettings,
     /// Open the dialog for pasting in a theme.
@@ -81,6 +86,8 @@ impl Cmd {
         match self {
             Self::OpenFile(rel) | Self::OpenAt { rel, .. } => current != Some(rel.as_str()),
             Self::OpenRepo(_) | Self::OpenDiff { .. } | Self::Quit | Self::RestartToUpdate => true,
+            // These rewrite files on disk, so unsaved edits are settled first.
+            Self::Act(Action::Stash | Action::StashApply(_) | Action::StashPop(_)) => true,
             _ => false,
         }
     }
@@ -332,6 +339,11 @@ pub struct Repo {
     pub decorations: Decorations,
     pub branches: Vec<Branch>,
     pub worktrees: Vec<Worktree>,
+    pub stashes: Vec<Stash>,
+    /// The message of a commit being undone, to put back in the commit box.
+    undone_message: Option<String>,
+    /// The stash waiting on "delete it?".
+    pub confirm_drop_stash: Option<Stash>,
     pub tab: Tab,
     pub view: View,
     pub commit_message: String,
@@ -369,6 +381,9 @@ impl Repo {
             decorations: Decorations::default(),
             branches: Vec::new(),
             worktrees: Vec::new(),
+            stashes: Vec::new(),
+            undone_message: None,
+            confirm_drop_stash: None,
             tab: Tab::Files,
             view: View::Empty,
             commit_message: String::new(),
@@ -466,9 +481,20 @@ impl Repo {
 
     fn run(&mut self, action: Action) {
         if self.busy.is_none() {
+            if matches!(action, Action::UndoCommit) {
+                self.undone_message = git::last_commit_message(&self.root);
+            }
             self.busy = Some(action.label());
             self.worker.act(action);
         }
+    }
+
+    /// Whether the last commit can still be rewritten: there is one, and it
+    /// has not been pushed.
+    pub fn can_rewrite_last_commit(&self) -> bool {
+        self.busy.is_none()
+            && self.status.head.is_some()
+            && (self.status.upstream.is_none() || self.status.ahead > 0)
     }
 
     pub fn can_commit(&self) -> bool {
@@ -608,12 +634,10 @@ impl Repo {
                     self.status_loaded = true;
                 }
             },
-            Event::Refs {
-                branches,
-                worktrees,
-            } => {
-                self.branches = branches;
-                self.worktrees = worktrees;
+            Event::Refs(refs) => {
+                self.branches = refs.branches;
+                self.worktrees = refs.worktrees;
+                self.stashes = refs.stashes;
             }
             Event::Diff { token, result } => {
                 if let View::Diff(view) = &mut self.view
@@ -626,11 +650,18 @@ impl Repo {
             Event::ActionDone { action, result } => {
                 self.busy = None;
                 match result {
-                    Ok(()) => {
-                        if matches!(action, Action::Commit(_)) {
-                            self.commit_message.clear();
+                    Ok(()) => match action {
+                        Action::Commit(_) | Action::Amend(_) => self.commit_message.clear(),
+                        // The message comes back with the changes, ready to edit.
+                        Action::UndoCommit => {
+                            if let Some(message) = self.undone_message.take()
+                                && self.commit_message.trim().is_empty()
+                            {
+                                self.commit_message = message;
+                            }
                         }
-                    }
+                        _ => {}
+                    },
                     Err(e) => *toast = Some(Toast::error(e, now)),
                 }
             }
@@ -1123,6 +1154,11 @@ impl App {
                 repo.terminals.grab_focus = true;
             }
             (Cmd::AskDiscardAll, Some(repo)) => repo.confirm_discard_all = true,
+            (Cmd::AskDropStash(stash), Some(repo)) => repo.confirm_drop_stash = Some(stash),
+            (Cmd::Amend, Some(repo)) => {
+                let message = repo.commit_message.trim().to_owned();
+                repo.run(Action::Amend(message));
+            }
             (Cmd::OpenDiff { change, staged }, Some(repo)) => repo.open_diff(change, staged),
             (Cmd::Act(action), Some(repo)) => repo.run(action),
             (Cmd::Commit, Some(repo)) => {

@@ -19,7 +19,9 @@ use std::time::{Duration, Instant};
 
 use crate::diff::{self, Diff};
 use crate::document::{self, Body, FileStamp, Highlights, LoadedFile};
-use crate::git::{self, BlameLine, Branch, Change, SearchOptions, SearchResults, Status, Worktree};
+use crate::git::{
+    self, BlameLine, Branch, Change, SearchOptions, SearchResults, Stash, Status, Worktree,
+};
 
 /// How often to look for outside changes while the window has focus.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -38,6 +40,15 @@ pub enum Action {
     /// Throw away every unstaged change.
     DiscardAll,
     Commit(String),
+    /// Fold what is staged into the last commit; an empty message keeps its own.
+    Amend(String),
+    /// Take back the last commit, leaving its changes staged.
+    UndoCommit,
+    /// Set every change aside.
+    Stash,
+    StashApply(usize),
+    StashPop(usize),
+    StashDrop(usize),
     Switch(String),
     /// Check out a branch that only exists on a remote (`origin/name`).
     Track(String),
@@ -60,7 +71,11 @@ impl Action {
             Self::Stage(_) | Self::StageAll => "Staging…",
             Self::Unstage(_) | Self::UnstageAll => "Unstaging…",
             Self::Discard(_) | Self::DiscardAll => "Discarding…",
-            Self::Commit(_) => "Committing…",
+            Self::Commit(_) | Self::Amend(_) => "Committing…",
+            Self::UndoCommit => "Undoing…",
+            Self::Stash => "Stashing…",
+            Self::StashApply(_) | Self::StashPop(_) => "Applying…",
+            Self::StashDrop(_) => "Deleting…",
             Self::Switch(_) | Self::Track(_) | Self::CreateBranch(_) => "Switching…",
             Self::Fetch => "Fetching…",
             Self::Pull => "Pulling…",
@@ -97,10 +112,7 @@ enum Job {
 
 pub enum Event {
     Status(Result<Status, String>),
-    Refs {
-        branches: Vec<Branch>,
-        worktrees: Vec<Worktree>,
-    },
+    Refs(Refs),
     Diff {
         token: u64,
         result: Result<Diff, String>,
@@ -170,19 +182,24 @@ impl Outbox {
     }
 
     fn send_refs(&self, root: &Path) {
-        let (branches, worktrees) = read_refs(root);
-        self.send(Event::Refs {
-            branches,
-            worktrees,
-        });
+        self.send(Event::Refs(read_refs(root)));
     }
 }
 
-fn read_refs(root: &Path) -> (Vec<Branch>, Vec<Worktree>) {
-    (
-        git::branches(root).unwrap_or_default(),
-        git::worktrees(root).unwrap_or_default(),
-    )
+/// The parts of a repository that change less often than its files.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Refs {
+    pub branches: Vec<Branch>,
+    pub worktrees: Vec<Worktree>,
+    pub stashes: Vec<Stash>,
+}
+
+fn read_refs(root: &Path) -> Refs {
+    Refs {
+        branches: git::branches(root).unwrap_or_default(),
+        worktrees: git::worktrees(root).unwrap_or_default(),
+        stashes: git::stashes(root).unwrap_or_default(),
+    }
 }
 
 pub struct Worker {
@@ -413,6 +430,12 @@ fn run_action(root: &Path, action: &Action) -> Result<(), String> {
         Action::Discard(change) => git::discard(root, change),
         Action::DiscardAll => git::discard_all(root),
         Action::Commit(message) => git::commit(root, message),
+        Action::Amend(message) => git::amend(root, message),
+        Action::UndoCommit => git::undo_commit(root),
+        Action::Stash => git::stash_push(root),
+        Action::StashApply(index) => git::stash_apply(root, *index),
+        Action::StashPop(index) => git::stash_pop(root, *index),
+        Action::StashDrop(index) => git::stash_drop(root, *index),
         Action::Switch(name) => git::switch_branch(root, name),
         Action::Track(remote_branch) => git::track_branch(root, remote_branch),
         Action::CreateBranch(name) => git::create_branch(root, name),
@@ -430,7 +453,7 @@ struct GitThread {
     /// What the UI was last told, so polling can stay quiet when nothing moved.
     last_status: Option<Result<Status, String>>,
     last_diff: Option<(u64, Result<Diff, String>)>,
-    last_refs: Option<(Vec<Branch>, Vec<Worktree>)>,
+    last_refs: Option<Refs>,
     polls: u32,
     last_fetch: Option<Instant>,
 }
@@ -476,6 +499,12 @@ impl GitThread {
                 let refs_changed = matches!(
                     action,
                     Action::Commit(_)
+                        | Action::Amend(_)
+                        | Action::UndoCommit
+                        | Action::Stash
+                        | Action::StashApply(_)
+                        | Action::StashPop(_)
+                        | Action::StashDrop(_)
                         | Action::Switch(_)
                         | Action::Track(_)
                         | Action::CreateBranch(_)
@@ -560,10 +589,7 @@ impl GitThread {
         let refs = read_refs(&self.root);
         if force || self.last_refs.as_ref() != Some(&refs) {
             self.last_refs = Some(refs.clone());
-            self.outbox.send(Event::Refs {
-                branches: refs.0,
-                worktrees: refs.1,
-            });
+            self.outbox.send(Event::Refs(refs));
         }
     }
 

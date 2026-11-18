@@ -97,6 +97,7 @@ pub fn root(app: &mut App, ui: &mut Ui, cmds: &mut Vec<Cmd>) {
 
             discard_modal(&ctx, repo, cmds);
             discard_all_modal(&ctx, repo, cmds);
+            drop_stash_modal(&ctx, repo, cmds);
             search::quick_open(&ctx, repo, cmds);
         }
     }
@@ -397,6 +398,37 @@ fn discard_all_modal(ctx: &egui::Context, repo: &mut Repo, cmds: &mut Vec<Cmd>) 
     });
     if close || dismissed || changes.is_empty() {
         repo.confirm_discard_all = false;
+    }
+}
+
+fn drop_stash_modal(ctx: &egui::Context, repo: &mut Repo, cmds: &mut Vec<Cmd>) {
+    let Some(stash) = &repo.confirm_drop_stash else {
+        return;
+    };
+    let mut close = false;
+    let dismissed = dialog(ctx, "drop_stash_modal", |ui| {
+        dialog_title(ui, "Delete this stash?");
+        dialog_body(
+            ui,
+            format!(
+                "\"{}\" will be deleted without being applied. This can't be undone.",
+                stash.label
+            ),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if button(ui, ButtonKind::Danger, "Delete", None, true).clicked() {
+                cmds.push(Cmd::Act(Action::StashDrop(stash.index)));
+                close = true;
+            }
+            if button(ui, ButtonKind::Secondary, "Cancel", None, true).clicked() {
+                close = true;
+            }
+        });
+    });
+    // The list moved under the dialog: what it names may no longer be there.
+    let gone = !repo.stashes.contains(stash);
+    if close || dismissed || gone {
+        repo.confirm_drop_stash = None;
     }
 }
 

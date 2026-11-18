@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.0
+
+- **Stash**: the new "..." button beside Commit has **Stash changes**, which sets every change aside, new files included. Stashes are listed under the changes; click one to apply and remove it, apply and keep it, or delete it.
+- **Amend last commit**: adds what is staged to the last commit, and uses the message in the box if you wrote one.
+- **Undo last commit**: takes the last commit back, leaves its changes staged and puts its message back in the box. Amend and undo are only offered while the commit has not been pushed.
+- **Worktrees inside the repository** (a `.worktrees` folder, for example) no longer show up as untracked changes. They are checkouts of the same repository, which is also why discarding them did nothing.
+- Discarding a folder that is a separate git repository now says that Feather will not delete it, instead of silently doing nothing.
+- Stashing or applying a stash while a file has unsaved edits asks about them first.
+
 ## 0.4.1
 
 - **Feather is the default theme again.** Version 0.4.0 switched everyone to a new theme by mistake. This update puts you back on Feather.
