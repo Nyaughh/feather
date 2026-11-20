@@ -24,12 +24,29 @@ use widgets::{ButtonKind, button, elided, paint_galley, paint_icon, paint_row_bg
 
 /// How narrow the terminal docked on the right may make the content beside it.
 const MIN_CONTENT_WIDTH: f32 = 200.0;
+/// The narrowest the terminal docked on the right gets before the sidebar
+/// has to give way: room for its buttons and a tab.
+const MIN_RIGHT_DOCK_WIDTH: f32 = 200.0;
+const SIDEBAR_WIDTHS: std::ops::RangeInclusive<f32> = 208.0..=440.0;
+
+/// The widths the sidebar may take out of `total`. With the terminal docked on
+/// the right it stops where the content and the terminal would get too narrow.
+fn sidebar_widths(total: f32, right_dock: bool) -> std::ops::RangeInclusive<f32> {
+    let (least, most) = (*SIDEBAR_WIDTHS.start(), *SIDEBAR_WIDTHS.end());
+    if !right_dock {
+        return SIDEBAR_WIDTHS;
+    }
+    let room = total - MIN_CONTENT_WIDTH - MIN_RIGHT_DOCK_WIDTH;
+    least..=room.clamp(least, most)
+}
 
 /// The starting width and the allowed widths of the terminal docked on the
-/// right, given the width it shares with the content. It never grows so wide
-/// that the content beside it disappears, even in a small window.
+/// right, given the width it shares with the content. The content keeps
+/// [`MIN_CONTENT_WIDTH`] where it can; when even that is too much the two
+/// share what there is, so neither disappears.
 fn right_dock_size(available: f32) -> (f32, std::ops::RangeInclusive<f32>) {
-    let most = (available - MIN_CONTENT_WIDTH).clamp(0.0, 1000.0);
+    let content = MIN_CONTENT_WIDTH.min(available / 2.0);
+    let most = (available - content).clamp(0.0, 1000.0);
     (440.0_f32.min(most), 260.0_f32.min(most)..=most)
 }
 
@@ -48,10 +65,12 @@ pub fn root(app: &mut App, ui: &mut Ui, cmds: &mut Vec<Cmd>) {
         Some(repo) => {
             let sidebar_open = app.settings.sidebar_open;
             if sidebar_open {
+                let right_dock =
+                    repo.terminals.open && app.settings.terminal_dock == TerminalDock::Right;
                 Panel::left("sidebar")
                     .resizable(true)
                     .default_size(264.0)
-                    .size_range(208.0..=440.0)
+                    .size_range(sidebar_widths(ui.available_width(), right_dock))
                     .frame(Frame::new().fill(theme::bg_shell()))
                     .show_separator_line(false)
                     .show(ui, |ui| sidebar::show(ui, repo, &app.settings, cmds));
@@ -724,17 +743,29 @@ mod tests {
 
     #[test]
     fn the_right_dock_leaves_room_for_the_content() {
-        // A roomy window: the usual sizes.
+        // A roomy window: the usual sizes, sidebar included.
         assert_eq!(right_dock_size(1400.0), (440.0, 260.0..=1000.0));
-        // 640 wide with the sidebar open leaves 376: the terminal gets what the
-        // content can spare, and no more.
-        let (default, range) = right_dock_size(376.0);
-        assert_eq!(default, 176.0);
-        assert_eq!(range, 176.0..=176.0);
-        assert!(376.0 - range.end() >= MIN_CONTENT_WIDTH);
+        assert_eq!(sidebar_widths(1400.0, true), SIDEBAR_WIDTHS);
         let (default, range) = right_dock_size(600.0);
         assert_eq!((default, range), (400.0, 260.0..=400.0));
-        // No room at all.
-        assert_eq!(right_dock_size(100.0), (0.0, 0.0..=0.0));
+        // Docked at the bottom, the sidebar is as free as ever.
+        assert_eq!(sidebar_widths(640.0, false), SIDEBAR_WIDTHS);
+
+        // The smallest window, 640 wide, with the sidebar as wide as it will
+        // go: the content and the terminal both keep their minimum.
+        let sidebar = sidebar_widths(640.0, true);
+        assert_eq!(sidebar, 208.0..=240.0);
+        for width in [*sidebar.start(), *sidebar.end()] {
+            let available = 640.0 - width;
+            let (default, range) = right_dock_size(available);
+            assert!(*range.start() >= MIN_RIGHT_DOCK_WIDTH, "{width}: {range:?}");
+            assert!(default >= MIN_RIGHT_DOCK_WIDTH);
+            assert!(available - range.end() >= MIN_CONTENT_WIDTH);
+        }
+
+        // Smaller still (a zoomed-in interface): the two share what is left.
+        let (default, range) = right_dock_size(220.0);
+        assert_eq!((default, range), (110.0, 110.0..=110.0));
+        assert_eq!(right_dock_size(0.0), (0.0, 0.0..=0.0));
     }
 }

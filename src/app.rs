@@ -1069,11 +1069,12 @@ impl App {
                 .is_some_and(|r| r.terminals.open && r.terminals.focused);
 
         ctx.input_mut(|i| {
-            if i.consume_shortcut(&shortcut(Key::Backtick)) {
-                cmds.push(Cmd::ToggleTerminal);
-            }
+            // Shift variants first: a plain Ctrl+` pattern also matches Ctrl+Shift+`.
             if i.consume_shortcut(&shifted(Key::Backtick)) {
                 cmds.push(Cmd::NewTerminal);
+            }
+            if i.consume_shortcut(&shortcut(Key::Backtick)) {
+                cmds.push(Cmd::ToggleTerminal);
             }
             if self.repo.is_some() && i.consume_shortcut(&split_shortcut()) {
                 cmds.push(Cmd::SplitTerminal);

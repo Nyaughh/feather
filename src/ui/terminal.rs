@@ -348,68 +348,105 @@ fn more_menu(ui: &Ui, rect: Rect, repo: &Repo, dock: TerminalDock, cmds: &mut Ve
     let group = terminals.tabs.get(terminals.active);
     let panes = group.map_or(0, |g| g.panes.len());
     let active = group.map_or(0, |g| g.active);
+
+    // Open on whichever side of the button has more room, and scroll within
+    // it, so every item can be reached however small the window is.
+    let (align, room) = menu_placement(rect, ctx.content_rect());
     Popup::menu(&response)
         .frame(popup_frame())
-        .align(RectAlign::BOTTOM_END)
-        .align_alternatives(&[RectAlign::BOTTOM_END, RectAlign::TOP_END])
-        .gap(4.0)
+        .align(align)
+        .align_alternatives(&[align])
+        .gap(MENU_GAP)
         .show(|ui| {
-            ui.set_width(260.0);
-            ui.spacing_mut().item_spacing.y = 0.0;
-            let new = ctx.format_shortcut(&egui::KeyboardShortcut::new(
-                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-                egui::Key::Backtick,
-            ));
-            if menu_item(ui, Some(icon::PLUS), "New Terminal", Some(&new), false).clicked() {
-                cmds.push(Cmd::NewTerminal);
-            }
-            let shortcut = ctx.format_shortcut(&split_shortcut());
-            if menu_item(
-                ui,
-                Some(split_icon(dock)),
-                "Split Terminal",
-                Some(&shortcut),
-                false,
-            )
-            .clicked()
-            {
-                cmds.push(Cmd::SplitTerminal);
-            }
-            if panes > 1 {
-                let next = ctx.format_shortcut(&focus_pane_shortcut(egui::Key::ArrowRight));
-                if menu_item(ui, None, "Focus Next Split", Some(&next), false).clicked() {
-                    cmds.push(Cmd::FocusPane((active + 1) % panes));
-                }
-                let previous = ctx.format_shortcut(&focus_pane_shortcut(egui::Key::ArrowLeft));
-                if menu_item(ui, None, "Focus Previous Split", Some(&previous), false).clicked() {
-                    cmds.push(Cmd::FocusPane((active + panes - 1) % panes));
-                }
-                if menu_item(ui, Some(icon::CLOSE), "Close Split", None, false).clicked() {
-                    cmds.push(Cmd::ClosePane(active));
-                }
-            }
-            if terminals.tabs.len() > 1 {
-                menu_separator(ui);
-                for (i, tab) in terminals.tabs.iter().enumerate() {
-                    let label = format!("{}: {}", i + 1, tab.title());
-                    let current = i == terminals.active;
-                    if menu_item(ui, Some(icon::TERMINAL), &label, None, current).clicked() {
-                        cmds.push(Cmd::SelectTerminal(i));
-                    }
-                }
-            }
-            menu_separator(ui);
-            for (choice, glyph, label) in [
-                (TerminalDock::Bottom, icon::DOCK_BOTTOM, "Dock at Bottom"),
-                (TerminalDock::Right, icon::DOCK_RIGHT, "Dock on Right"),
-            ] {
-                if menu_item(ui, Some(glyph), label, None, dock == choice).clicked()
-                    && dock != choice
-                {
-                    cmds.push(Cmd::DockTerminal(choice));
-                }
-            }
+            ScrollArea::vertical()
+                .id_salt("terminal_menu")
+                .max_height(room)
+                .show(ui, |ui| {
+                    ui.set_width(260.0);
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    menu_items(ui, &ctx, terminals, panes, active, dock, cmds);
+                });
         });
+}
+
+const MENU_GAP: f32 = 4.0;
+
+/// Where the "..." menu opens: below the button, or above it when there is
+/// more room there. Also returns how tall its list may be.
+fn menu_placement(button: Rect, screen: Rect) -> (RectAlign, f32) {
+    // The popup frame and a little space from the window edge.
+    let chrome = 2.0 * 4.0 + 8.0;
+    let below = screen.bottom() - button.bottom() - MENU_GAP - chrome;
+    let above = button.top() - screen.top() - MENU_GAP - chrome;
+    if below >= 320.0 || below >= above {
+        (RectAlign::BOTTOM_END, below.max(60.0))
+    } else {
+        (RectAlign::TOP_END, above.max(60.0))
+    }
+}
+
+/// The menu's contents: new and split first, then where the panel sits, then
+/// (possibly many) tabs to switch to.
+fn menu_items(
+    ui: &mut Ui,
+    ctx: &egui::Context,
+    terminals: &Terminals,
+    panes: usize,
+    active: usize,
+    dock: TerminalDock,
+    cmds: &mut Vec<Cmd>,
+) {
+    let new = ctx.format_shortcut(&egui::KeyboardShortcut::new(
+        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+        egui::Key::Backtick,
+    ));
+    if menu_item(ui, Some(icon::PLUS), "New Terminal", Some(&new), false).clicked() {
+        cmds.push(Cmd::NewTerminal);
+    }
+    let shortcut = ctx.format_shortcut(&split_shortcut());
+    if menu_item(
+        ui,
+        Some(split_icon(dock)),
+        "Split Terminal",
+        Some(&shortcut),
+        false,
+    )
+    .clicked()
+    {
+        cmds.push(Cmd::SplitTerminal);
+    }
+    if panes > 1 {
+        let next = ctx.format_shortcut(&focus_pane_shortcut(egui::Key::ArrowRight));
+        if menu_item(ui, None, "Focus Next Split", Some(&next), false).clicked() {
+            cmds.push(Cmd::FocusPane((active + 1) % panes));
+        }
+        let previous = ctx.format_shortcut(&focus_pane_shortcut(egui::Key::ArrowLeft));
+        if menu_item(ui, None, "Focus Previous Split", Some(&previous), false).clicked() {
+            cmds.push(Cmd::FocusPane((active + panes - 1) % panes));
+        }
+        if menu_item(ui, Some(icon::CLOSE), "Close Split", None, false).clicked() {
+            cmds.push(Cmd::ClosePane(active));
+        }
+    }
+    menu_separator(ui);
+    for (choice, glyph, label) in [
+        (TerminalDock::Bottom, icon::DOCK_BOTTOM, "Dock at Bottom"),
+        (TerminalDock::Right, icon::DOCK_RIGHT, "Dock on Right"),
+    ] {
+        if menu_item(ui, Some(glyph), label, None, dock == choice).clicked() && dock != choice {
+            cmds.push(Cmd::DockTerminal(choice));
+        }
+    }
+    if terminals.tabs.len() > 1 {
+        menu_separator(ui);
+        for (i, tab) in terminals.tabs.iter().enumerate() {
+            let label = format!("{}: {}", i + 1, tab.title());
+            let current = i == terminals.active;
+            if menu_item(ui, Some(icon::TERMINAL), &label, None, current).clicked() {
+                cmds.push(Cmd::SelectTerminal(i));
+            }
+        }
+    }
 }
 
 /// The sixteen basic terminal colors, taken from the theme.
@@ -755,6 +792,21 @@ mod tests {
             Rect::from_min_size(pos2(0.0, 151.0), vec2(601.0, 150.0))
         );
         assert_eq!(pane_rects(body, 1, TerminalDock::Right), [body]);
+    }
+
+    #[test]
+    fn the_menu_opens_where_it_fits() {
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(640.0, 400.0));
+        let button = |y: f32| Rect::from_min_size(pos2(600.0, y), vec2(24.0, 24.0));
+        // Near the top (the terminal docked on the right): below, using the
+        // room down to the window's edge.
+        let (align, room) = menu_placement(button(40.0), screen);
+        assert_eq!(align, RectAlign::BOTTOM_END);
+        assert!(room > 300.0 && 64.0 + MENU_GAP + room < 400.0);
+        // Near the bottom (a short panel docked at the bottom): above.
+        let (align, room) = menu_placement(button(290.0), screen);
+        assert_eq!(align, RectAlign::TOP_END);
+        assert!(room > 250.0 && room + MENU_GAP < 290.0);
     }
 
     #[test]
