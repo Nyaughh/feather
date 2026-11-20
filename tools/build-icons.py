@@ -2,10 +2,11 @@
   pip install pillow resvg-py
   python tools/build-icons.py
 
-The source is assets/brand/feather-black.svg (the designer's mark, traced). The
-colours and the tile shape are the ones in README.md, under "Brand". This
-writes the tile SVGs next to the mark, the app icons in assets/ and the site
-icons in site/. Run it from the repository root after changing the mark or the
+The source is assets/brand/feather-black.svg (the designer's mark, traced),
+plus assets/brand/og-base.png for the social card. The colours and the tile
+shape are the ones in README.md, under "Brand". This writes the white mark and
+the tile SVGs next to the black one, the app icons in assets/ and the site
+icons and social card in site/. Run it from the repository root after changing the mark or the
 brand colours, and commit what it writes.
 """
 
@@ -15,7 +16,7 @@ import struct
 from pathlib import Path
 
 import resvg_py
-from PIL import Image, ImageChops, ImageDraw, ImageStat
+from PIL import Image
 
 GOLD = '#FFC53D'  # the tile
 INK = '#09090A'  # the mark on the tile; also the app's dark shell
@@ -77,6 +78,23 @@ def app_icon(px):
     return render(tile_svg(**tier), px)
 
 
+def and_mask(im):
+    """The 1-bit mask under a bitmap icon: set where the pixel is fully
+    transparent, for anything that draws icons by mask rather than by alpha.
+    Bottom-up rows, most significant bit first, each padded to 4 bytes."""
+    w, h = im.size
+    alpha = im.getchannel('A').tobytes()
+    stride = ((w + 31) // 32) * 4
+    out = bytearray()
+    for y in range(h - 1, -1, -1):
+        row = bytearray(stride)
+        for x in range(w):
+            if alpha[y * w + x] == 0:
+                row[x // 8] |= 0x80 >> (x % 8)
+        out += row
+    return bytes(out)
+
+
 def write_ico(path, images):
     """An .ico with each size drawn for that size: classic 32-bit bitmaps up to
     128 px and PNG at 256, the layout Windows and resource compilers expect."""
@@ -91,8 +109,7 @@ def write_ico(path, images):
         else:
             header = struct.pack('<IiiHHIIiiII', 40, w, h * 2, 1, 32, 0, 0, 0, 0, 0, 0)
             rows = [im.crop((0, y, w, y + 1)).tobytes('raw', 'BGRA') for y in range(h - 1, -1, -1)]
-            mask_row = ((w + 31) // 32) * 4
-            blob = header + b''.join(rows) + b'\0' * (mask_row * h)
+            blob = header + b''.join(rows) + and_mask(im)
         entries.append(struct.pack('<BBBBHHII', w % 256, h % 256, 0, 0, 1, 32, len(blob), offset))
         blobs.append(blob)
         offset += len(blob)
@@ -104,27 +121,29 @@ def save_png(im, path):
     print('wrote', path)
 
 
-def og_image(path='site/og.jpg'):
-    """Swaps the tile in the social card (54 px, top left) for the current one.
-    The rest of the card is a screenshot of the site and is left alone; the
-    card is only rewritten when the tile in it is out of date, so running this
-    again doesn't recompress the JPEG for nothing."""
-    card = Image.open(path).convert('RGB')
+def og_image():
+    """The social card: assets/brand/og-base.png (a screenshot of the site with
+    an empty spot, top left) with the tile pasted in. Built from the same two
+    inputs every time, so a new mark or colour always reaches it and a rerun
+    with nothing changed writes the same bytes."""
+    card = Image.open('assets/brand/og-base.png').convert('RGB')
     tile = render(tile_svg(**MEDIUM), 54 * 4).resize((54, 54), Image.LANCZOS)
-    want = card.copy()
-    ImageDraw.Draw(want).rectangle((62, 50, 121, 109), fill=(9, 9, 9))
-    want.paste(tile, (65, 53), tile)
-    box = (62, 50, 122, 110)
-    diff = ImageChops.difference(card.crop(box), want.crop(box)).convert('L')
-    if ImageStat.Stat(diff).mean[0] < 12:  # JPEG noise, not a different tile
-        print(path, 'is up to date')
-        return
-    want.save(path, quality=90, optimize=True, progressive=True)
-    print('wrote', path)
+    card.paste(tile, (65, 53), tile)
+    card.save('site/og.jpg', quality=90, optimize=True, progressive=True)
+    print('wrote site/og.jpg')
+
+
+def white_mark():
+    """The one-colour white mark, from the black one, so the two never drift apart."""
+    white = MARK.replace('fill="#000000"', 'fill="#FFFFFF"')
+    assert white != MARK, 'feather-black.svg should fill its path with #000000'
+    Path('assets/brand/feather-white.svg').write_text(white)
+    print('wrote assets/brand/feather-white.svg')
 
 
 def main():
     brand = Path('assets/brand')
+    white_mark()
     # Windows, Linux, the window icon and the web.
     for name, tier in (('icon.svg', LARGE), ('icon-48.svg', MEDIUM), ('icon-24.svg', SMALL)):
         (brand / name).write_text(tile_svg(**tier))

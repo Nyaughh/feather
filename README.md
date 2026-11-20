@@ -212,11 +212,12 @@ The app keeps its own accent colours (indigo by default, or whatever the user
 picks); the gold is for the icon and the website. Don't recolour the mark,
 add outlines or effects, or rotate it.
 
-Every icon is generated from the mark. After changing it or the colours, run
-`pip install pillow resvg-py` once, then `python tools/build-icons.py`, and
-commit what it writes: the tile SVGs in `assets/brand/`, `assets/icon.ico`,
-`icon.png` and `icon-1024.png` (the macOS bundle's source), and the favicons,
-header logo, icon and social card in `site/`.
+Every icon is generated from the black mark. After changing it or the colours,
+run `pip install pillow resvg-py` once, then `python tools/build-icons.py`, and
+commit what it writes: the white mark and the tile SVGs in `assets/brand/`,
+`assets/icon.ico`, `icon.png` and `icon-1024.png` (the macOS bundle's source),
+and the favicons, header logo, icon and social card in `site/`. The social card
+is `assets/brand/og-base.png` (a screenshot of the site) with the tile added.
 
 ## Fonts
 
