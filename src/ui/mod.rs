@@ -260,10 +260,10 @@ fn welcome(ui: &mut Ui, settings: &Settings, cmds: &mut Vec<Cmd>) {
                 ui.set_width(width);
                 ui.spacing_mut().item_spacing.y = 0.0;
 
+                // The app icon, drawn from its SVG so it is sharp at any scale.
                 let (mark, _) = ui.allocate_exact_size(vec2(44.0, 44.0), Sense::hover());
-                ui.painter()
-                    .rect_filled(mark, CornerRadius::same(11), theme::accent());
-                paint_icon(ui, mark.center(), icon::FEATHER, 24.0, theme::on_accent());
+                egui::Image::new(egui::include_image!("../../assets/brand/icon-48.svg"))
+                    .paint_at(ui, mark);
 
                 ui.add_space(18.0);
                 ui.label(

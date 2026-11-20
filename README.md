@@ -193,6 +193,31 @@ release the same way and offer to update, which relies on the download names
 cargo test
 ```
 
+## Brand
+
+The mark is a single feather, from a sheet of options drawn for Feather by a
+designer: a solid vane, notched twice on its leading edge, with the shaft cut
+through it and curling away as the quill. It was picked from that sheet because
+it is one shape that still reads as a feather at 16 px, and its tall, diagonal
+build fills a square icon.
+
+| | |
+|---|---|
+| **Mark** | `assets/brand/feather-black.svg` and `feather-white.svg`, the one-colour versions for anything that isn't the icon |
+| **Gold** `#FFC53D` | The brand colour: the icon tile, and the accent on the website. Warm and light, like the name, and set against the app's own accent rather than copying it |
+| **Ink** `#09090A` | The mark on the tile, and the app's dark shell |
+| **Tile** | Gold rounded square, ink mark. Corner radius 22.5% of the tile, mark about 64% of the canvas height. Below 64 px the tile fills the square and the mark grows to 72-80% so it stays legible. macOS uses Apple's grid (an 824 px tile on 1024) with a soft shadow |
+
+The app keeps its own accent colours (indigo by default, or whatever the user
+picks); the gold is for the icon and the website. Don't recolour the mark,
+add outlines or effects, or rotate it.
+
+Every icon is generated from the mark. After changing it or the colours, run
+`pip install pillow resvg-py` once, then `python tools/build-icons.py`, and
+commit what it writes: the tile SVGs in `assets/brand/`, `assets/icon.ico`,
+`icon.png` and `icon-1024.png` (the macOS bundle's source), and the favicons,
+header logo, icon and social card in `site/`.
+
 ## Fonts
 
 The bundled [Inter](https://rsms.me/inter/) (SIL Open Font License) and
