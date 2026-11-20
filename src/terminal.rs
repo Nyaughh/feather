@@ -590,17 +590,29 @@ mod tests {
         assert_eq!(terminals.tabs[0].active, 2);
         assert_eq!(terminals.tabs[0].title(), "sh, sh, sh");
 
-        // Each one runs and answers on its own.
+        // Each one runs and answers on its own. The command is typed before
+        // the new shell may have printed its prompt, so its echo can come
+        // first and the prompt then shares a line with the output. The output
+        // is told apart from the echo by its text, not by where it lands.
         for (i, pane) in terminals.tabs[0].panes.iter_mut().enumerate() {
-            pane.send(format!("echo pane-{i}-ok\r").as_bytes());
+            pane.send(format!("printf 'pane-%s-ok\\n' {i}\r").as_bytes());
         }
         for (i, pane) in terminals.tabs[0].panes.iter_mut().enumerate() {
             let expected = format!("pane-{i}-ok");
-            assert!(wait_for(pane, |t| t
-                .screen()
-                .contents()
-                .lines()
-                .any(|line| line.trim() == expected)));
+            assert!(
+                wait_for(pane, |t| t.screen().contents().contains(&expected)),
+                "pane {i}'s screen was: {:?}",
+                pane.screen().contents()
+            );
+            // Nothing typed into another split reached this one.
+            let contents = pane.screen().contents();
+            for other in (0..3).filter(|&other| other != i) {
+                assert!(
+                    !contents.contains(&format!("pane-{other}-ok"))
+                        && !contents.contains(&format!("' {other}")),
+                    "pane {i} shows pane {other}'s input: {contents:?}"
+                );
+            }
         }
 
         terminals.cycle_pane(true);
