@@ -304,7 +304,7 @@ impl Worker {
         self.events.try_recv().ok()
     }
 
-    fn token(&mut self) -> u64 {
+    pub fn token(&mut self) -> u64 {
         self.next_token += 1;
         self.next_token
     }

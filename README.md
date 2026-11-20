@@ -59,6 +59,43 @@ Security > Open Anyway.
 The [website](https://feather.lh3k.dev/#install) has the steps for each system.
 Feather needs `git` on your `PATH`, and keeps itself up to date after that.
 
+## The `feather` command
+
+Open files and folders from a terminal, the way `code` works with VS Code:
+
+```sh
+feather .              # this folder as the workspace
+feather t2chat         # another folder
+feather src/main.rs    # a file, in the repository it belongs to
+feather notes.md       # a file that doesn't exist yet: opens empty, created on save
+feather                # just start Feather (it reopens the last repository)
+```
+
+Paths are relative to the terminal's current folder, and the command returns
+to the prompt straight away. If a Feather window already shows that folder (or
+the repository a file is in), that window comes to the front and opens it; a
+window with nothing open is reused too. Otherwise a new window opens.
+
+| Option               | Effect                                              |
+|----------------------|-----------------------------------------------------|
+| `-n`, `--new-window`   | Always open a new window                            |
+| `-r`, `--reuse-window` | Open in the most recent window, replacing its folder |
+| `-w`, `--wait`         | Open a new window and return when it closes         |
+| `-h`, `--help`         | Show the options                                    |
+| `-v`, `--version`      | Show the version                                    |
+
+Putting the command on your `PATH`:
+
+- **Windows**: the installer does it (the *Add the "feather" command to PATH*
+  option, on by default). Open a new terminal afterwards. It works in
+  PowerShell, Command Prompt and Git Bash, and the uninstaller removes it.
+- **macOS**: in Feather, open Settings > Command line > **Install**. This links
+  `/usr/local/bin/feather` to the app, asking for your password if that folder
+  needs it.
+- **Linux**: Settings > Command line > **Install** links `~/.local/bin/feather`
+  to the program. Most distributions already have `~/.local/bin` on `PATH`;
+  Feather says so if yours doesn't.
+
 ## Building from source
 
 You need a [Rust toolchain](https://rustup.rs).
@@ -68,7 +105,10 @@ cargo run --release            # reopens the last repository
 cargo run --release -- ~/code/my-repo
 ```
 
-The optimized binary is written to `target/release/feather`.
+The optimized binary is written to `target/release/feather`. A build only hands
+paths to windows of the same program file, so one built from source and an
+installed Feather keep to their own windows. Debug builds stay attached to the
+terminal instead of returning to the prompt, so their output stays visible.
 
 ## Shortcuts
 

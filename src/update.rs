@@ -190,7 +190,10 @@ impl Updater {
     /// Starts the newly installed version. The caller then closes this one.
     pub fn relaunch(&self) -> Result<(), String> {
         let exe = self.exe.as_ref().ok_or("unknown install location")?;
+        // `--wait` runs the new copy in a window of its own, instead of handing
+        // the path to this one as it closes.
         std::process::Command::new(exe)
+            .arg("--wait")
             .args(std::env::args_os().skip(1))
             .spawn()
             .map(drop)

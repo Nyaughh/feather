@@ -130,6 +130,16 @@ pub fn load(path: &Path, rel: &str) -> LoadedFile {
     }
 }
 
+/// A file that doesn't exist yet, open for typing. Saving creates it.
+pub fn new_file(path: &Path) -> LoadedFile {
+    LoadedFile {
+        path: path.to_owned(),
+        size: 0,
+        stamp: None,
+        body: Body::Text(text_doc(Vec::new())),
+    }
+}
+
 fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8192).any(|b| *b == 0)
 }

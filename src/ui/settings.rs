@@ -213,6 +213,8 @@ fn body(ui: &mut Ui, settings: &mut Settings, updater: &Updater, cmds: &mut Vec<
         |ui| toggle(ui, "blame", &mut settings.blame),
     );
 
+    command_line(ui, cmds);
+
     section(ui, "Updates");
     row(
         ui,
@@ -269,6 +271,47 @@ fn body(ui: &mut Ui, settings: &mut Settings, updater: &Updater, cmds: &mut Vec<
             }
         } else {
             ui.add(egui::Spinner::new().size(16.0).color(theme::text_muted()));
+        }
+    });
+}
+
+/// The `feather` terminal command, and putting it on the PATH.
+fn command_line(ui: &mut Ui, cmds: &mut Vec<Cmd>) {
+    use crate::shell_command::{self, Status};
+    section(ui, "Command line");
+    let link = shell_command::link_path().map(|p| p.display().to_string());
+    let (description, action) = match shell_command::status() {
+        Status::Installer => (
+            "Type feather . or feather main.rs in a terminal to open it here. The \
+             installer puts the command on your PATH."
+                .to_owned(),
+            None,
+        ),
+        Status::Installed => (
+            format!(
+                "Installed as {}. Type feather . or feather main.rs in a terminal to open it here.",
+                link.unwrap_or_default()
+            ),
+            Some(("Remove", Cmd::RemoveCommand)),
+        ),
+        Status::Missing => (
+            format!(
+                "Open files and folders from a terminal with feather . or feather main.rs. \
+                 Installing links {} to Feather.",
+                link.unwrap_or_default()
+            ),
+            Some(("Install", Cmd::InstallCommand)),
+        ),
+        Status::Taken(path) => (
+            format!("{} belongs to another program.", path.display()),
+            None,
+        ),
+    };
+    row(ui, "The feather command", &description, |ui| {
+        if let Some((label, cmd)) = action
+            && button(ui, ButtonKind::Secondary, label, None, true).clicked()
+        {
+            cmds.push(cmd);
         }
     });
 }

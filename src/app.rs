@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
+use crate::cli::{self, Target};
 use crate::diff::Diff;
 use crate::document::{self, Body, Highlights, LoadedFile, Preview, Span, TextDoc};
 use crate::git::{
@@ -96,14 +97,24 @@ pub enum Cmd {
     LeaveSaving,
     LeaveDiscarding,
     LeaveCancelled,
+    /// A file or folder named on the command line, outside the open repository.
+    OpenPath(Target),
+    /// Start a file that doesn't exist yet; saving creates it.
+    NewFile(String),
+    /// Put the `feather` command on the PATH, or take it off.
+    InstallCommand,
+    RemoveCommand,
 }
 
 impl Cmd {
     /// Whether carrying this out would drop what is in the editor.
     fn leaves_file(&self, current: Option<&str>) -> bool {
         match self {
-            Self::OpenFile(rel) | Self::OpenAt { rel, .. } => current != Some(rel.as_str()),
+            Self::OpenFile(rel) | Self::OpenAt { rel, .. } | Self::NewFile(rel) => {
+                current != Some(rel.as_str())
+            }
             Self::OpenRepo(_)
+            | Self::OpenPath(_)
             | Self::OpenDiff { .. }
             | Self::OpenCommit(_)
             | Self::Quit
@@ -489,6 +500,37 @@ impl Repo {
         });
     }
 
+    /// Opens an empty editor for a file that doesn't exist yet.
+    fn open_new_file(&mut self, rel: String) {
+        if self.open_rel() == Some(rel.as_str()) {
+            return;
+        }
+        let token = self.worker.token();
+        let file = document::new_file(&self.root.join(&rel));
+        // Nothing on disk yet, so nothing has changed until something appears.
+        self.worker.watch(Watch::File {
+            rel: rel.clone(),
+            stamp: None,
+        });
+        let edit = match &file.body {
+            Body::Text(doc) => Some(EditBuffer::new(doc, token)),
+            _ => None,
+        };
+        self.view = View::File(FileView {
+            preview: false,
+            rel,
+            token,
+            file: Some(file),
+            edit,
+            jump: None,
+            find: None,
+            blame: None,
+            cursor: None,
+            cursor_index: None,
+            line_end: None,
+        });
+    }
+
     /// Opens a file (if it is not open already) and moves the cursor.
     fn open_at(&mut self, rel: String, jump: Jump) {
         self.open_file(rel);
@@ -583,8 +625,14 @@ impl Repo {
         let (Some(buffer), Some(file)) = (&mut view.edit, &mut view.file) else {
             return Ok(());
         };
-        if !buffer.dirty {
+        // A new file is written even untouched, as saving it would be expected to.
+        let new = file.stamp.is_none() && !file.path.exists();
+        if !buffer.dirty && !new {
             return Ok(());
+        }
+        if new && let Some(dir) = file.path.parent() {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| format!("Could not save {}: {e}", view.rel))?;
         }
         let result = if buffer.crlf {
             std::fs::write(&file.path, buffer.text.replace('\n', "\r\n"))
@@ -607,6 +655,9 @@ impl Repo {
         });
         self.worker.blame(&view.rel);
         self.worker.refresh();
+        if new {
+            self.tree.refresh();
+        }
         Ok(())
     }
 
@@ -863,6 +914,15 @@ pub struct ThemeImport {
     pub error: Option<String>,
 }
 
+/// How this window was started.
+pub struct Startup {
+    /// A file or folder named on the command line.
+    pub target: Option<Target>,
+    /// Asked for as a new, empty window (`feather --new-window` with no path),
+    /// so the last repository isn't reopened.
+    pub new_window: bool,
+}
+
 pub struct App {
     pub settings: Settings,
     pub theme_import: Option<ThemeImport>,
@@ -875,13 +935,18 @@ pub struct App {
     pub confirm_leave: Option<Cmd>,
     images: Arc<crate::images::Loader>,
     folder_dialog: Option<Receiver<Option<PathBuf>>>,
+    /// Takes paths from `feather` commands run while this window is open.
+    instance: Option<crate::instance::Server>,
+    /// Installing or removing the `feather` command, which may wait on a
+    /// password prompt.
+    command_job: Option<Receiver<Result<String, String>>>,
     was_focused: bool,
     /// Set once the user has agreed to close with (or without) saving.
     closing: bool,
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, initial: Option<PathBuf>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, startup: Startup) -> Self {
         let mut settings: Settings = cc
             .storage
             .and_then(|s| eframe::get_value(s, SETTINGS_KEY))
@@ -908,20 +973,31 @@ impl App {
             confirm_leave: None,
             images,
             folder_dialog: None,
+            instance: {
+                let ctx = cc.egui_ctx.clone();
+                crate::instance::Server::start(move || ctx.request_repaint())
+            },
+            command_job: None,
             was_focused: true,
             closing: false,
         };
-        // A path on the command line wins; otherwise reopen the last repository.
-        let start = initial.or_else(|| app.settings.recent.first().cloned());
-        if let Some(path) = start.filter(|p| p.is_dir()) {
-            app.open_repo(&path, &cc.egui_ctx);
+        // A path on the command line wins; otherwise reopen the last
+        // repository, unless this was asked for as a new, empty window.
+        match startup.target {
+            Some(target) => app.open_target(target, &cc.egui_ctx),
+            None if startup.new_window => {}
+            None => {
+                if let Some(path) = app.settings.recent.first().cloned().filter(|p| p.is_dir()) {
+                    app.open_repo(&path, &cc.egui_ctx);
+                }
+            }
         }
         app
     }
 
     fn open_repo(&mut self, path: &Path, ctx: &egui::Context) {
         let path = path.canonicalize().unwrap_or_else(|_| path.to_owned());
-        let path = strip_verbatim(path);
+        let path = cli::strip_verbatim(path);
         let repo = Repo::open(&path, ctx);
         let mut repo = repo;
         repo.github = repo.is_git.then(|| git::github_slug(&repo.root)).flatten();
@@ -933,7 +1009,67 @@ impl App {
             "{} - Feather",
             repo.name
         )));
+        if let Some(instance) = &self.instance {
+            instance.set_root(Some(repo.root.clone()));
+        }
         self.repo = Some(repo);
+    }
+
+    /// Opens a path from the command line: a folder as the workspace, a file
+    /// in the open repository if it is inside it, otherwise in its own.
+    fn open_target(&mut self, target: Target, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
+        let path = match target {
+            Target::Folder(path) => return self.run(Cmd::OpenRepo(path), ctx),
+            Target::File(path) | Target::NewFile(path) => path,
+        };
+        let inside = |repo: &Repo| cli::relative_to(&repo.root, &path).filter(|r| !r.is_empty());
+        if self.repo.as_ref().and_then(inside).is_none() {
+            match cli::existing_ancestor(path.parent().unwrap_or(&path)) {
+                Some(dir) if dir.is_dir() => self.open_repo(&dir, ctx),
+                _ => {
+                    let text = format!("Can't open {}", path.display());
+                    self.toast = Some(Toast::error(text, now));
+                    return;
+                }
+            }
+        }
+        let Some(repo) = &mut self.repo else { return };
+        let Some(rel) = inside(repo) else { return };
+        if path.exists() {
+            repo.open_file(rel);
+        } else {
+            repo.open_new_file(rel);
+        }
+    }
+
+    /// What to do with a path another `feather` command handed over. `None`
+    /// when this window already shows it.
+    fn plan_handoff(&self, target: Target) -> Option<Cmd> {
+        let Some(repo) = &self.repo else {
+            return Some(Cmd::OpenPath(target));
+        };
+        if crate::instance::shows(&repo.root, &target) {
+            return match target {
+                Target::Folder(_) => None,
+                Target::File(path) => cli::relative_to(&repo.root, &path).map(Cmd::OpenFile),
+                Target::NewFile(path) => cli::relative_to(&repo.root, &path).map(Cmd::NewFile),
+            };
+        }
+        Some(Cmd::OpenPath(target))
+    }
+
+    fn start_command_job(&mut self, job: fn() -> Result<String, String>, ctx: &egui::Context) {
+        if self.command_job.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(job());
+            ctx.request_repaint();
+        });
+        self.command_job = Some(rx);
     }
 
     fn pick_repo(&mut self, ctx: &egui::Context) {
@@ -968,6 +1104,29 @@ impl App {
                     }
                 }
                 Err(mpsc::TryRecvError::Disconnected) => self.folder_dialog = None,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+
+        while let Some(handoff) = self.instance.as_ref().and_then(|i| i.poll()) {
+            // Come to the front, as if the user had switched to this window.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            if let Some(cmd) = self.plan_handoff(handoff.target) {
+                cmds.push(cmd);
+            }
+        }
+
+        if let Some(rx) = &self.command_job {
+            match rx.try_recv() {
+                Ok(result) => {
+                    self.command_job = None;
+                    self.toast = Some(match result {
+                        Ok(text) => Toast::info(text, now),
+                        Err(text) => Toast::error(text, now),
+                    });
+                }
+                Err(mpsc::TryRecvError::Disconnected) => self.command_job = None,
                 Err(mpsc::TryRecvError::Empty) => {}
             }
         }
@@ -1205,7 +1364,13 @@ impl App {
                     self.run(pending, ctx);
                 }
             }
+            (Cmd::OpenPath(target), _) => self.open_target(target, ctx),
+            (Cmd::InstallCommand, _) => {
+                self.start_command_job(crate::shell_command::install, ctx);
+            }
+            (Cmd::RemoveCommand, _) => self.start_command_job(crate::shell_command::remove, ctx),
             (Cmd::OpenFile(rel), Some(repo)) => repo.open_file(rel),
+            (Cmd::NewFile(rel), Some(repo)) => repo.open_new_file(rel),
             (Cmd::OpenAt { rel, jump }, Some(repo)) => repo.open_at(rel, jump),
             (Cmd::FocusSearch, Some(repo)) => {
                 repo.tab = Tab::Search;
@@ -1362,19 +1527,4 @@ impl eframe::App for App {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         theme::bg_shell().to_normalized_gamma_f32()
     }
-}
-
-/// `canonicalize` on Windows yields `\\?\C:\…` paths, which git and people
-/// both dislike. Strip the prefix when the rest is an ordinary drive path.
-fn strip_verbatim(path: PathBuf) -> PathBuf {
-    #[cfg(windows)]
-    {
-        let text = path.to_string_lossy();
-        if let Some(rest) = text.strip_prefix(r"\\?\")
-            && rest.as_bytes().get(1) == Some(&b':')
-        {
-            return PathBuf::from(rest.to_owned());
-        }
-    }
-    path
 }

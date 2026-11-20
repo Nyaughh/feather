@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+# The `feather` command for Git Bash and other POSIX shells on Windows, which
+# don't run feather.cmd by that name. The installer puts this folder on PATH.
+exec "$(dirname "$0")/../feather.exe" "$@"

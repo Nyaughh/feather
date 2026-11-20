@@ -33,6 +33,8 @@ OutputBaseFilename=feather-windows-x86_64-setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+; Tells open programs that PATH changed (for the feather command).
+ChangesEnvironment=yes
 ; Close a running Feather so its program file can be replaced.
 CloseApplications=yes
 RestartApplications=no
@@ -49,10 +51,15 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
+Name: "addtopath"; Description: "Add the ""feather"" command to PATH, to open files and folders from a terminal"; GroupDescription: "Command line:"
 Name: "contextmenu"; Description: "Add ""Open with Feather"" to the right-click menu for folders"; GroupDescription: "File Explorer:"
 
 [Files]
 Source: "..\..\target\release\feather.exe"; DestDir: "{app}"; Flags: ignoreversion
+; The feather command: bin\feather.cmd for Command Prompt and PowerShell,
+; bin\feather for Git Bash. Only this folder goes on PATH, not {app} itself.
+Source: "bin\feather.cmd"; DestDir: "{app}\bin"; Flags: ignoreversion
+Source: "bin\feather"; DestDir: "{app}\bin"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\Feather"; Filename: "{app}\feather.exe"
@@ -69,3 +76,65 @@ Root: HKCU; Subkey: "Software\Classes\Directory\Background\shell\Feather\command
 
 [Run]
 Filename: "{app}\feather.exe"; Description: "{cm:LaunchProgram,Feather}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+// Adds {app}\bin to the user's PATH when the "addtopath" task is chosen, and
+// takes it off again on uninstall. Only the user's own PATH is touched (no
+// administrator rights needed), and every other entry is left as it was.
+
+const
+  EnvironmentKey = 'Environment';
+
+function BinDir: String;
+begin
+  Result := ExpandConstant('{app}\bin');
+end;
+
+// Where Dir is among the ';'-separated entries of Path, ignoring case, or 0.
+// The position counts from the ';' added in front of Path.
+function FindEntry(Path, Dir: String): Integer;
+begin
+  Result := Pos(';' + Uppercase(Dir) + ';', ';' + Uppercase(Path) + ';');
+end;
+
+procedure AddToPath;
+var
+  Path: String;
+begin
+  if not RegQueryStringValue(HKCU, EnvironmentKey, 'Path', Path) then
+    Path := '';
+  if FindEntry(Path, BinDir) > 0 then
+    exit;
+  if (Path <> '') and (Copy(Path, Length(Path), 1) <> ';') then
+    Path := Path + ';';
+  RegWriteExpandStringValue(HKCU, EnvironmentKey, 'Path', Path + BinDir);
+end;
+
+procedure RemoveFromPath;
+var
+  Path: String;
+  At: Integer;
+begin
+  if not RegQueryStringValue(HKCU, EnvironmentKey, 'Path', Path) then
+    exit;
+  At := FindEntry(Path, BinDir);
+  if At = 0 then
+    exit;
+  // Drop the entry and the ';' before it, then the two ';' added around Path.
+  Path := ';' + Path + ';';
+  Delete(Path, At, Length(BinDir) + 1);
+  Path := Copy(Path, 2, Length(Path) - 2);
+  RegWriteExpandStringValue(HKCU, EnvironmentKey, 'Path', Path);
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if (CurStep = ssPostInstall) and WizardIsTaskSelected('addtopath') then
+    AddToPath;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usPostUninstall then
+    RemoveFromPath;
+end;
