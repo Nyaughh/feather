@@ -7,11 +7,15 @@
 //! our title bar, and the system still handles resizing.
 
 use eframe::egui::{
-    self, CornerRadius, CursorIcon, Frame, Id, Panel, PointerButton, Pos2, Rect, ResizeDirection,
-    Sense, Stroke, StrokeKind, Ui, ViewportCommand, pos2, vec2,
+    self, CornerRadius, CursorIcon, Frame, Id, Panel, PointerButton, Popup, Pos2, Rect, RectAlign,
+    ResizeDirection, Sense, Stroke, StrokeKind, Ui, ViewportCommand, pos2, vec2,
 };
+use std::path::PathBuf;
 
-use super::widgets::{elided, icon_button, paint_galley};
+use super::widgets::{
+    command_item, elided, icon_button, menu_item, menu_separator, paint_galley, popup_frame,
+    submenu, submenu_row,
+};
 use crate::app::{Cmd, Repo, View};
 use crate::theme::{self, TITLEBAR_HEIGHT, icon};
 use crate::update;
@@ -65,6 +69,7 @@ pub fn show(
     ui: &mut Ui,
     repo: Option<&Repo>,
     sidebar_open: bool,
+    recent: &[PathBuf],
     updater: &update::Updater,
     cmds: &mut Vec<Cmd>,
 ) {
@@ -72,13 +77,14 @@ pub fn show(
         .exact_size(TITLEBAR_HEIGHT)
         .frame(Frame::new().fill(theme::bg_shell()))
         .show_separator_line(false)
-        .show(ui, |ui| bar(ui, repo, sidebar_open, updater, cmds));
+        .show(ui, |ui| bar(ui, repo, sidebar_open, recent, updater, cmds));
 }
 
 fn bar(
     ui: &mut Ui,
     repo: Option<&Repo>,
     sidebar_open: bool,
+    recent: &[PathBuf],
     updater: &update::Updater,
     cmds: &mut Vec<Cmd>,
 ) {
@@ -98,11 +104,12 @@ fn bar(
     let mid = rect.center().y;
     let button = |x: f32| Rect::from_center_size(pos2(x, mid), vec2(28.0, 26.0));
 
-    // Left: sidebar toggle.
-    let mut left = rect.left() + 10.0;
+    // Left: the File menu, then the sidebar toggle.
+    let mut left = rect.left() + 6.0;
     if NATIVE_BUTTONS && !fullscreen {
         left += TRAFFIC_LIGHTS;
     }
+    left = file_menu(ui, left, mid, repo.is_some(), recent, cmds) + 4.0;
     if repo.is_some() {
         let tip = format!(
             "{} sidebar ({})",
@@ -193,6 +200,92 @@ fn bar(
     }
 }
 
+/// The File menu's button, with the menu under it. Returns the x where the
+/// button ends.
+fn file_menu(
+    ui: &mut Ui,
+    left: f32,
+    mid: f32,
+    has_folder: bool,
+    recent: &[PathBuf],
+    cmds: &mut Vec<Cmd>,
+) -> f32 {
+    let ctx = ui.ctx().clone();
+    let galley =
+        ui.painter()
+            .layout_no_wrap("File".to_owned(), theme::ui_font(13.0), theme::text());
+    let rect = Rect::from_min_size(pos2(left, mid - 13.0), vec2(galley.size().x + 16.0, 26.0));
+    let response = ui
+        .interact(rect, Id::unique("file_menu"), Sense::click())
+        .on_hover_cursor(CursorIcon::PointingHand);
+    let open = Popup::is_id_open(&ctx, Popup::default_response_id(&response));
+    let color = if response.hovered() || open {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(5), theme::overlay(22));
+        theme::text()
+    } else {
+        theme::text_secondary()
+    };
+    let pos = rect.center() - galley.size() / 2.0;
+    ui.painter()
+        .galley_with_override_text_color(pos.round(), galley, color);
+
+    let keys = |key, shift| Some(shortcut_text_with(&ctx, key, shift));
+    let mut chosen = None;
+    Popup::menu(&response)
+        .frame(popup_frame())
+        .align(RectAlign::BOTTOM_START)
+        .align_alternatives(&[RectAlign::BOTTOM_START])
+        .gap(4.0)
+        .show(|ui| {
+            ui.set_width(250.0);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let entry = |ui: &mut Ui, label, keys: Option<String>, enabled, why_not| {
+                command_item(ui, label, keys.as_deref(), enabled, why_not)
+            };
+            if entry(ui, "New Window", keys(egui::Key::N, true), true, "") {
+                chosen = Some(Cmd::NewWindow);
+            }
+            menu_separator(ui);
+            if entry(ui, "Open File…", keys(egui::Key::O, true), true, "") {
+                chosen = Some(Cmd::PickFile);
+            }
+            if entry(ui, "Open Folder…", keys(egui::Key::O, false), true, "") {
+                chosen = Some(Cmd::PickRepo);
+            }
+            let row = submenu_row(ui, "Open Recent", "", !recent.is_empty());
+            if !recent.is_empty() {
+                submenu(ui, &row, 320.0, |ui| {
+                    for path in recent {
+                        let (name, parent) = super::folder_label(path);
+                        if menu_item(ui, None, &name, Some(&parent), false)
+                            .on_hover_text(path.display().to_string())
+                            .clicked()
+                        {
+                            chosen = Some(Cmd::OpenRepo(path.clone()));
+                        }
+                    }
+                    menu_separator(ui);
+                    if entry(ui, "Clear Recently Opened", None, true, "") {
+                        chosen = Some(Cmd::ClearRecent);
+                    }
+                });
+            }
+            menu_separator(ui);
+            if entry(ui, "Close Folder", None, has_folder, "No folder is open") {
+                chosen = Some(Cmd::CloseFolder);
+            }
+            if entry(ui, "Close Window", keys(egui::Key::W, true), true, "") {
+                chosen = Some(Cmd::Quit);
+            }
+            if chosen.is_some() {
+                ui.close();
+            }
+        });
+    cmds.extend(chosen);
+    rect.right()
+}
+
 /// Paints minimise, maximise/restore and close at the right edge. Returns the
 /// x where they begin.
 fn window_controls(ui: &Ui, bar: Rect, maximized: bool, cmds: &mut Vec<Cmd>) -> f32 {
@@ -272,7 +365,15 @@ fn window_controls(ui: &Ui, bar: Rect, maximized: bool, cmds: &mut Vec<Cmd>) -> 
 }
 
 fn shortcut_text(ctx: &egui::Context, key: egui::Key) -> String {
-    ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, key))
+    shortcut_text_with(ctx, key, false)
+}
+
+fn shortcut_text_with(ctx: &egui::Context, key: egui::Key, shift: bool) -> String {
+    let mut modifiers = egui::Modifiers::COMMAND;
+    if shift {
+        modifiers |= egui::Modifiers::SHIFT;
+    }
+    ctx.format_shortcut(&egui::KeyboardShortcut::new(modifiers, key))
 }
 
 /// Lets the window be resized by its edges and draws its outline. Call last

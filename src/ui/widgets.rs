@@ -1,12 +1,12 @@
 //! Small hand-painted building blocks shared by the sidebar and content area.
 
 use eframe::egui::{
-    self, Align2, Color32, CornerRadius, CursorIcon, FontId, Galley, Id, Pos2, Rect, Response,
-    Sense, Stroke, StrokeKind, Ui, Vec2, pos2, text::LayoutJob, text::TextWrapping, vec2,
+    self, Align2, Color32, CornerRadius, CursorIcon, FontId, Galley, Id, Popup, Pos2, Rect,
+    Response, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, text::LayoutJob, text::TextWrapping, vec2,
 };
 use std::sync::Arc;
 
-use crate::theme;
+use crate::theme::{self, icon};
 
 /// Lays out one line of text, ending in "…" if it does not fit `max_width`.
 pub fn elided(ui: &Ui, text: &str, font: FontId, color: Color32, max_width: f32) -> Arc<Galley> {
@@ -195,6 +195,96 @@ pub fn menu_item(
     response
 }
 
+/// A menu row that opens a submenu beside it: label, an optional count,
+/// and an arrow.
+pub fn submenu_row(ui: &mut Ui, label: &str, detail: &str, enabled: bool) -> Response {
+    let width = ui.available_width();
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 30.0), sense);
+    let mid = rect.center().y;
+    let open = Popup::is_id_open(
+        ui.ctx(),
+        egui::containers::menu::SubMenu::id_from_widget_id(response.id),
+    );
+    paint_row_bg(ui, rect, enabled && (response.hovered() || open), false);
+    let (text, muted) = if enabled {
+        (theme::text(), theme::text_secondary())
+    } else {
+        (theme::text_faint(), theme::text_faint())
+    };
+    paint_icon(
+        ui,
+        pos2(rect.right() - 14.0, mid),
+        icon::CARET_RIGHT,
+        12.0,
+        muted,
+    );
+    let mut right = rect.right() - 26.0;
+    if !detail.is_empty() {
+        let count = ui.painter().layout_no_wrap(
+            detail.to_owned(),
+            theme::ui_font(12.0),
+            theme::text_muted(),
+        );
+        right -= count.size().x;
+        paint_galley(ui, right, mid, count);
+        right -= 8.0;
+    }
+    let x = rect.left() + 10.0;
+    let label = elided(ui, label, theme::ui_font(13.0), text, right - x);
+    paint_galley(ui, x, mid, label);
+    response
+}
+
+/// A plain menu row: label only, dimmed and explained when it can't be used.
+pub fn plain_item(ui: &mut Ui, label: &str, enabled: bool, why_not: &str) -> bool {
+    command_item(ui, label, None, enabled, why_not)
+}
+
+/// A menu row for a command: its label, and its keyboard shortcut on the
+/// right. Dimmed and explained when it can't be used.
+pub fn command_item(
+    ui: &mut Ui,
+    label: &str,
+    shortcut: Option<&str>,
+    enabled: bool,
+    why_not: &str,
+) -> bool {
+    let width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click());
+    let mid = rect.center().y;
+    paint_row_bg(ui, rect, enabled && response.hovered(), false);
+    let (color, muted) = if enabled {
+        (theme::text(), theme::text_muted())
+    } else {
+        (theme::text_faint(), theme::text_faint())
+    };
+    let mut right = rect.right() - 10.0;
+    if let Some(shortcut) = shortcut {
+        let keys = ui
+            .painter()
+            .layout_no_wrap(shortcut.to_owned(), theme::ui_font(12.0), muted);
+        right -= keys.size().x;
+        paint_galley(ui, right, mid, keys);
+        right -= 16.0;
+    }
+    let x = rect.left() + 10.0;
+    let label = elided(ui, label, theme::ui_font(13.0), color, right - x);
+    paint_galley(ui, x, mid, label);
+    if enabled {
+        response.on_hover_cursor(CursorIcon::PointingHand).clicked()
+    } else {
+        if !why_not.is_empty() {
+            response.on_hover_text(why_not);
+        }
+        false
+    }
+}
+
 /// A thin line between groups of items in a popup menu.
 pub fn menu_separator(ui: &mut Ui) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 9.0), Sense::hover());
@@ -203,6 +293,15 @@ pub fn menu_separator(ui: &mut Ui) {
         rect.center().y,
         Stroke::new(1.0, theme::border()),
     );
+}
+
+/// Opens `content` beside `row` while the row is hovered, as VS Code's menus do.
+pub fn submenu(ui: &Ui, row: &Response, width: f32, content: impl FnOnce(&mut Ui)) {
+    egui::containers::menu::SubMenu::new().show(ui, row, |ui| {
+        ui.set_width(width);
+        ui.spacing_mut().item_spacing.y = 0.0;
+        content(ui);
+    });
 }
 
 /// A two-option segmented control. Returns the newly chosen index, if any.

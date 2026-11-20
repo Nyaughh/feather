@@ -10,7 +10,7 @@ use eframe::egui::{
 use super::virtual_rows;
 use super::widgets::{
     ButtonKind, button, elided, empty_state, icon_button, menu_item, menu_separator, paint_galley,
-    paint_icon, paint_row_bg, popup_frame,
+    paint_icon, paint_row_bg, plain_item, popup_frame, submenu, submenu_row,
 };
 use crate::app::{Cmd, Repo, Tab, View};
 use crate::git::{Branch, Change, ChangeKind, Commit, Stash};
@@ -670,74 +670,6 @@ fn commit_box(ui: &mut Ui, repo: &mut Repo, cmds: &mut Vec<Cmd>) {
     });
 }
 
-/// A menu row that opens a submenu beside it: label, an optional count,
-/// and an arrow.
-fn submenu_row(ui: &mut Ui, label: &str, detail: &str, enabled: bool) -> Response {
-    let width = ui.available_width();
-    let sense = if enabled {
-        Sense::click()
-    } else {
-        Sense::hover()
-    };
-    let (rect, response) = ui.allocate_exact_size(vec2(width, 30.0), sense);
-    let mid = rect.center().y;
-    let open = Popup::is_id_open(
-        ui.ctx(),
-        egui::containers::menu::SubMenu::id_from_widget_id(response.id),
-    );
-    paint_row_bg(ui, rect, enabled && (response.hovered() || open), false);
-    let (text, muted) = if enabled {
-        (theme::text(), theme::text_secondary())
-    } else {
-        (theme::text_faint(), theme::text_faint())
-    };
-    paint_icon(
-        ui,
-        pos2(rect.right() - 14.0, mid),
-        icon::CARET_RIGHT,
-        12.0,
-        muted,
-    );
-    let mut right = rect.right() - 26.0;
-    if !detail.is_empty() {
-        let count = ui.painter().layout_no_wrap(
-            detail.to_owned(),
-            theme::ui_font(12.0),
-            theme::text_muted(),
-        );
-        right -= count.size().x;
-        paint_galley(ui, right, mid, count);
-        right -= 8.0;
-    }
-    let x = rect.left() + 10.0;
-    let label = elided(ui, label, theme::ui_font(13.0), text, right - x);
-    paint_galley(ui, x, mid, label);
-    response
-}
-
-/// A plain menu row: label only, dimmed and explained when it can't be used.
-fn plain_item(ui: &mut Ui, label: &str, enabled: bool, why_not: &str) -> bool {
-    let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click());
-    let mid = rect.center().y;
-    paint_row_bg(ui, rect, enabled && response.hovered(), false);
-    let color = if enabled {
-        theme::text()
-    } else {
-        theme::text_faint()
-    };
-    let label = elided(ui, label, theme::ui_font(13.0), color, rect.width() - 20.0);
-    paint_galley(ui, rect.left() + 10.0, mid, label);
-    if enabled {
-        response.on_hover_cursor(CursorIcon::PointingHand).clicked()
-    } else {
-        if !why_not.is_empty() {
-            response.on_hover_text(why_not);
-        }
-        false
-    }
-}
-
 /// A small heading inside a menu.
 fn menu_heading(ui: &mut Ui, text: &str) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
@@ -784,15 +716,6 @@ fn stash_row(ui: &mut Ui, stash: &Stash, now: i64) -> Response {
     );
     paint_galley(ui, x, mid, label);
     response
-}
-
-/// Opens `content` beside `row` while the row is hovered, as VS Code's menus do.
-fn submenu(ui: &Ui, row: &Response, width: f32, content: impl FnOnce(&mut Ui)) {
-    egui::containers::menu::SubMenu::new().show(ui, row, |ui| {
-        ui.set_width(width);
-        ui.spacing_mut().item_spacing.y = 0.0;
-        content(ui);
-    });
 }
 
 /// The "..." beside Commit: pull, push and fetch, then commit, changes and

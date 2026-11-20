@@ -12,6 +12,7 @@ mod instance;
 mod markdown;
 mod settings;
 mod shell_command;
+mod store;
 mod terminal;
 mod theme;
 mod themes;
@@ -109,7 +110,9 @@ fn run(startup: app::Startup) -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: ui::titlebar::configure(viewport),
         renderer: eframe::Renderer::Glow,
-        persist_window: true,
+        // A window opened beside others starts where the system puts it,
+        // rather than exactly on top of the one whose place was saved.
+        persist_window: !instance::others_running(),
         ..Default::default()
     };
     eframe::run_native(

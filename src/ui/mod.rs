@@ -56,6 +56,7 @@ pub fn root(app: &mut App, ui: &mut Ui, cmds: &mut Vec<Cmd>) {
         ui,
         app.repo.as_ref(),
         app.settings.sidebar_open,
+        &app.settings.recent,
         &app.updater,
         cmds,
     );
@@ -228,6 +229,19 @@ pub(crate) fn virtual_rows_from(
             add_row(ui, i, row);
         }
     });
+}
+
+/// A folder's name, and the folder it is in, for lists of recent folders.
+pub(crate) fn folder_label(path: &std::path::Path) -> (String, String) {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    let parent = path
+        .parent()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    (name, parent)
 }
 
 // ── Welcome screen ─────────────────────────────────────────────────────────

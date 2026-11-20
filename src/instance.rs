@@ -269,15 +269,11 @@ pub fn hand_off(target: &Target, window: WindowChoice) -> bool {
 
 /// Whether another window of this program already shows `folder` (or the
 /// repository it is in). Nothing changes in that window.
-// For the multi-window work, which builds on this registry.
-#[allow(dead_code)]
 pub fn open_elsewhere(folder: &Path) -> bool {
     offer(&[Want::Peek], Some(&Target::Folder(folder.to_owned())))
 }
 
 /// Whether any other window of this program is open.
-// For the multi-window work, which builds on this registry.
-#[allow(dead_code)]
 pub fn others_running() -> bool {
     offer(&[Want::Ping], None)
 }

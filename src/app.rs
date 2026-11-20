@@ -16,6 +16,7 @@ use crate::git::{
     Stash, Status, Worktree,
 };
 use crate::settings::{Settings, TerminalDock};
+use crate::store::{self, Store};
 use crate::terminal::Terminals;
 use crate::tree::Tree;
 use crate::update::{self, Updater};
@@ -23,7 +24,6 @@ use crate::worker::{Action, CommitDetail, Event, Watch, Worker};
 use crate::{theme, ui};
 
 const SETTINGS_KEY: &str = "feather";
-const MAX_RECENT: usize = 8;
 const TOAST_SECONDS: f64 = 7.0;
 /// With auto save on, edits are written this long after typing stops.
 const AUTO_SAVE_SECONDS: f64 = 1.0;
@@ -32,7 +32,18 @@ const AUTO_SAVE_SECONDS: f64 = 1.0;
 /// afterwards, so drawing code only ever needs shared access to state.
 pub enum Cmd {
     PickRepo,
+    /// Ask for a file to open.
+    PickFile,
+    /// Open a file chosen in the picker: here if it is in this window's
+    /// folder or no folder is open, otherwise in a new window.
+    OpenPickedFile(PathBuf),
     OpenRepo(PathBuf),
+    /// Open another window, on the home screen.
+    NewWindow,
+    /// Put this window back on the home screen.
+    CloseFolder,
+    /// Forget the recently opened folders.
+    ClearRecent,
     OpenFile(String),
     OpenDiff {
         change: Change,
@@ -112,6 +123,7 @@ impl Cmd {
             Self::OpenFile(rel) | Self::OpenAt { rel, .. } => current != Some(rel.as_str()),
             Self::OpenRepo(_)
             | Self::OpenPath(_)
+            | Self::CloseFolder
             | Self::OpenDiff { .. }
             | Self::OpenCommit(_)
             | Self::Quit
@@ -950,6 +962,8 @@ pub struct Startup {
 
 pub struct App {
     pub settings: Settings,
+    /// Shares settings with the other windows.
+    store: Store,
     pub theme_import: Option<ThemeImport>,
     pub repo: Option<Repo>,
     pub toast: Option<Toast>,
@@ -959,7 +973,8 @@ pub struct App {
     /// The action waiting on "save your changes first?".
     pub confirm_leave: Option<Cmd>,
     images: Arc<crate::images::Loader>,
-    folder_dialog: Option<Receiver<Option<PathBuf>>>,
+    /// A folder or file picker that is open, and which of the two it is.
+    dialog: Option<(Picking, Receiver<Option<PathBuf>>)>,
     /// Takes paths from `feather` commands run while this window is open.
     instance: Option<crate::instance::Server>,
     /// Installing or removing the `feather` command, which may wait on a
@@ -972,12 +987,9 @@ pub struct App {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, startup: Startup) -> Self {
-        let mut settings: Settings = cc
-            .storage
-            .and_then(|s| eframe::get_value(s, SETTINGS_KEY))
-            .unwrap_or_default();
-        settings.migrate();
-        settings.sanitize();
+        // Settings saved by versions before the shared file came in.
+        let older: Option<Settings> = cc.storage.and_then(|s| eframe::get_value(s, SETTINGS_KEY));
+        let (store, settings) = Store::open(store::default_path(), older);
 
         theme::install_fonts(&cc.egui_ctx);
         theme::apply(&cc.egui_ctx, &settings);
@@ -989,6 +1001,7 @@ impl App {
 
         let mut app = Self {
             settings,
+            store,
             theme_import: None,
             repo: None,
             toast: None,
@@ -997,7 +1010,7 @@ impl App {
             settings_open: false,
             confirm_leave: None,
             images,
-            folder_dialog: None,
+            dialog: None,
             instance: {
                 let ctx = cc.egui_ctx.clone();
                 crate::instance::Server::start(move || ctx.request_repaint())
@@ -1015,7 +1028,10 @@ impl App {
             Some(target) => app.open_target(target, &cc.egui_ctx),
             None if startup.new_window => {}
             None => {
-                if let Some(path) = app.settings.recent.first().cloned().filter(|p| p.is_dir()) {
+                // Unless another window already has it open.
+                if let Some(path) = app.settings.recent.first().cloned().filter(|p| p.is_dir())
+                    && !crate::instance::open_elsewhere(&path)
+                {
                     app.open_repo(&path, &cc.egui_ctx);
                 }
             }
@@ -1030,9 +1046,7 @@ impl App {
         let mut repo = repo;
         repo.github = repo.is_git.then(|| git::github_slug(&repo.root)).flatten();
         self.images.set_repository(&repo.root, repo.github.clone());
-        self.settings.recent.retain(|p| *p != repo.root);
-        self.settings.recent.insert(0, repo.root.clone());
-        self.settings.recent.truncate(MAX_RECENT);
+        store::touch_recent(&mut self.settings.recent, &repo.root);
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
             "{} - Feather",
             repo.name
@@ -1111,38 +1125,68 @@ impl App {
         self.command_job = Some(rx);
     }
 
-    fn pick_repo(&mut self, ctx: &egui::Context) {
-        if self.folder_dialog.is_some() {
+    /// Shows the system's folder or file picker, without blocking the window.
+    fn pick(&mut self, picking: Picking, ctx: &egui::Context) {
+        if self.dialog.is_some() {
             return;
         }
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
-        let start = self.repo.as_ref().map(|r| r.root.clone());
+        let root = self.repo.as_ref().map(|r| r.root.clone());
         std::thread::spawn(move || {
-            let mut dialog = rfd::AsyncFileDialog::new().set_title("Open repository");
-            if let Some(dir) = start.as_deref().and_then(Path::parent) {
-                dialog = dialog.set_directory(dir);
-            }
-            let picked = pollster::block_on(dialog.pick_folder());
+            let mut dialog = rfd::AsyncFileDialog::new();
+            let picked = match picking {
+                Picking::Folder => {
+                    dialog = dialog.set_title("Open folder");
+                    if let Some(dir) = root.as_deref().and_then(Path::parent) {
+                        dialog = dialog.set_directory(dir);
+                    }
+                    pollster::block_on(dialog.pick_folder())
+                }
+                Picking::File => {
+                    dialog = dialog.set_title("Open file");
+                    if let Some(dir) = &root {
+                        dialog = dialog.set_directory(dir);
+                    }
+                    pollster::block_on(dialog.pick_file())
+                }
+            };
             let _ = tx.send(picked.map(|handle| handle.path().to_owned()));
             ctx.request_repaint();
         });
-        self.folder_dialog = Some(rx);
+        self.dialog = Some((picking, rx));
+    }
+
+    /// Back to the home screen, with nothing open.
+    fn close_folder(&mut self, ctx: &egui::Context) {
+        if let Some(repo) = self.repo.take() {
+            // Keeps it first in the list, ready to reopen.
+            store::touch_recent(&mut self.settings.recent, &repo.root);
+        }
+        // Now free to take a folder from a `feather` command.
+        if let Some(instance) = &self.instance {
+            instance.set_root(None);
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title("Feather".to_owned()));
     }
 
     /// Drains background results and reacts to focus changes.
     fn tick(&mut self, ctx: &egui::Context, cmds: &mut Vec<Cmd>) {
         let (now, focused) = ctx.input(|i| (i.time, i.focused));
 
-        if let Some(rx) = &self.folder_dialog {
+        if let Some((picking, rx)) = &self.dialog {
+            let picking = *picking;
             match rx.try_recv() {
                 Ok(picked) => {
-                    self.folder_dialog = None;
+                    self.dialog = None;
                     if let Some(path) = picked {
-                        cmds.push(Cmd::OpenRepo(path));
+                        cmds.push(match picking {
+                            Picking::Folder => Cmd::OpenRepo(path),
+                            Picking::File => Cmd::OpenPickedFile(path),
+                        });
                     }
                 }
-                Err(mpsc::TryRecvError::Disconnected) => self.folder_dialog = None,
+                Err(mpsc::TryRecvError::Disconnected) => self.dialog = None,
                 Err(mpsc::TryRecvError::Empty) => {}
             }
         }
@@ -1166,6 +1210,11 @@ impl App {
                 Err(mpsc::TryRecvError::Disconnected) => self.command_job = None,
                 Err(mpsc::TryRecvError::Empty) => {}
             }
+        }
+
+        // Writes settings changes, and picks up the other windows'.
+        if let Some(wait) = self.store.tick(&mut self.settings, now) {
+            ctx.request_repaint_after(Duration::from_secs_f64(wait));
         }
 
         if let Some(repo) = &mut self.repo {
@@ -1296,8 +1345,16 @@ impl App {
             if i.consume_shortcut(&shifted(Key::F)) {
                 cmds.push(Cmd::FocusSearch);
             }
+            if i.consume_shortcut(&shifted(Key::N)) {
+                cmds.push(Cmd::NewWindow);
+            }
             if terminal_has_keys {
                 return;
+            }
+            for (key, cmd) in [(Key::O, Cmd::PickFile), (Key::W, Cmd::Quit)] {
+                if i.consume_shortcut(&shifted(key)) {
+                    cmds.push(cmd);
+                }
             }
             let table = [
                 (shortcut(Key::O), Cmd::PickRepo),
@@ -1363,7 +1420,26 @@ impl App {
     fn run(&mut self, cmd: Cmd, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
         match (cmd, &mut self.repo) {
-            (Cmd::PickRepo, _) => self.pick_repo(ctx),
+            (Cmd::PickRepo, _) => self.pick(Picking::Folder, ctx),
+            (Cmd::PickFile, _) => self.pick(Picking::File, ctx),
+            (Cmd::NewWindow, _) => {
+                if let Err(e) = spawn_window(None) {
+                    self.toast = Some(Toast::error(e, now));
+                }
+            }
+            (Cmd::OpenPickedFile(path), _) => {
+                let elsewhere = self
+                    .repo
+                    .as_ref()
+                    .is_some_and(|repo| cli::relative_to(&repo.root, &path).is_none());
+                if !elsewhere {
+                    self.apply(Cmd::OpenPath(Target::File(path)), ctx);
+                } else if let Err(e) = spawn_window(Some(&path)) {
+                    self.toast = Some(Toast::error(e, now));
+                }
+            }
+            (Cmd::CloseFolder, _) => self.close_folder(ctx),
+            (Cmd::ClearRecent, _) => self.settings.recent.clear(),
             (Cmd::OpenRepo(path), _) => {
                 if path.is_dir() {
                     self.open_repo(&path, ctx);
@@ -1566,12 +1642,50 @@ impl eframe::App for App {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.store.flush(&mut self.settings);
+        // Still kept here too, for going back to an older version.
         eframe::set_value(storage, SETTINGS_KEY, &self.settings);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // The folder in the window closed last is the one a plain launch reopens.
+        if let Some(repo) = &self.repo {
+            store::touch_recent(&mut self.settings.recent, &repo.root);
+        }
+        self.store.flush(&mut self.settings);
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         theme::bg_shell().to_normalized_gamma_f32()
     }
+}
+
+/// Which picker is open.
+#[derive(Clone, Copy)]
+enum Picking {
+    Folder,
+    File,
+}
+
+/// Starts another Feather window showing `path`, or the home screen. Each
+/// window is its own process, so closing one leaves the others running.
+fn spawn_window(path: Option<&Path>) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| format!("Could not open a new window: {e}"))?;
+    let mut command = std::process::Command::new(exe);
+    command.arg("--new-window").args(path);
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // Its own process group, so it outlives a terminal this window came from.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("Could not open a new window: {e}"))?;
+    // Collected when it ends, so it doesn't linger as a zombie on Unix.
+    std::thread::spawn(move || child.wait());
+    Ok(())
 }
 
 /// Writes a file that must not exist yet, making its folders first. Fails

@@ -19,6 +19,10 @@ A fast, minimal desktop app for browsing a repository and handling everyday git.
 - **Terminal**: tabbed terminals in the repository folder, inside the window.
   Split a tab to run shells side by side, and dock the panel at the bottom or
   on the right from its `...` menu.
+- **Windows**: open as many windows as you like, each with its own folder, tabs,
+  terminals and git view. The File menu at the top left opens a new window, a
+  folder, a file or a recent folder, and Close Folder goes back to the home
+  screen and its list of recent folders.
 - **Themes**: eight built in, each light and dark, and any tweakcn or shadcn/ui
   theme can be pasted in. Plus accent colour, font size, line wrap and indentation.
 - **Blame**: who last changed the current line, beside the line and in the status
@@ -118,7 +122,10 @@ terminal instead of returning to the prompt, so their output stays visible.
 
 | Shortcut         | Action                         |
 |------------------|--------------------------------|
-| `Ctrl+O`         | Open a repository              |
+| `Ctrl+Shift+N`   | New window                     |
+| `Ctrl+O`         | Open a folder                  |
+| `Ctrl+Shift+O`   | Open a file                    |
+| `Ctrl+Shift+W`   | Close the window               |
 | `Ctrl+P`         | Go to file                     |
 | `Ctrl+Shift+F`   | Search in files                |
 | `Ctrl+F`         | Find in the open file          |
@@ -151,7 +158,15 @@ terminal instead of returning to the prompt, so their output stays visible.
 | `images.rs`   | Finds and decodes every image shown, including README badges.        |
 | `markdown.rs` | Turns the HTML in a README into Markdown the viewer can show.        |
 | `settings.rs` | Everything the user can change, saved between runs.                  |
+| `store.rs`    | The settings file every window shares, merged so none undo another.  |
 | `update.rs`   | Checks GitHub for a newer release and installs it.                   |
+
+Each window is its own process, so closing one leaves the rest running and
+quitting the last one quits Feather. The windows share one settings file: a
+window writes only the settings it changed and picks up the others' changes,
+including the list of recent folders. Starting Feather with no folder reopens
+the folder of the window closed last, unless another window is already open, in
+which case it starts on the home screen.
 
 Feather shells out to `git` rather than linking a git library, so commits use your
 hooks, signing and credential helpers exactly as they do in a terminal.

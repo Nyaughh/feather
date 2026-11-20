@@ -73,6 +73,8 @@ impl CustomTheme {
 pub const FONT_SIZES: std::ops::RangeInclusive<f32> = 10.0..=20.0;
 pub const ZOOM_LEVELS: [f32; 6] = [0.8, 0.9, 1.0, 1.1, 1.25, 1.5];
 pub const TAB_SIZES: [u8; 3] = [2, 4, 8];
+/// How many recently opened folders are remembered.
+pub const MAX_RECENT: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
