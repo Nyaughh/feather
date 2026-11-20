@@ -16,7 +16,7 @@ use eframe::egui::{
 
 use crate::app::{App, Cmd, Repo, Toast, ToastKind};
 use crate::git::ChangeKind;
-use crate::settings::Settings;
+use crate::settings::{Settings, TerminalDock};
 use crate::theme::{self, icon};
 use crate::update::{self, Updater};
 use crate::worker::Action;
@@ -46,14 +46,26 @@ pub fn root(app: &mut App, ui: &mut Ui, cmds: &mut Vec<Cmd>) {
                     .show(ui, |ui| sidebar::show(ui, repo, &app.settings, cmds));
             }
 
-            // The terminal shares the right-hand column, under the content.
+            // The terminal goes under the content, or beside it on the right.
+            // Each position remembers its own size.
             if repo.terminals.open {
-                Panel::bottom("terminal_panel")
+                let dock = app.settings.terminal_dock;
+                let panel = match dock {
+                    TerminalDock::Bottom => Panel::bottom("terminal_panel")
+                        .default_size(260.0)
+                        .size_range(110.0..=640.0),
+                    TerminalDock::Right => Panel::right("terminal_panel_right")
+                        .default_size(440.0)
+                        .size_range(260.0..=1000.0),
+                };
+                panel
                     .resizable(true)
-                    .default_size(260.0)
-                    .size_range(110.0..=640.0)
                     .frame(Frame::new().fill(theme::bg_shell()).inner_margin(Margin {
-                        left: if sidebar_open { 0 } else { 8 },
+                        left: if sidebar_open || dock == TerminalDock::Right {
+                            0
+                        } else {
+                            8
+                        },
                         right: 8,
                         top: 0,
                         bottom: 8,
@@ -67,7 +79,7 @@ pub fn root(app: &mut App, ui: &mut Ui, cmds: &mut Vec<Cmd>) {
                             .show(ui, |ui| {
                                 ui.set_min_size(ui.available_size());
                                 ui.shrink_clip_rect(ui.max_rect().shrink(1.0));
-                                terminal::show(ui, repo, cmds);
+                                terminal::show(ui, repo, dock, cmds);
                             });
                     });
             } else {

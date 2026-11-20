@@ -14,7 +14,7 @@ use crate::git::{
     self, BlameLine, Branch, Change, ChangeKind, Commit, CommitInfo, SearchOptions, SearchResults,
     Stash, Status, Worktree,
 };
-use crate::settings::Settings;
+use crate::settings::{Settings, TerminalDock};
 use crate::terminal::Terminals;
 use crate::tree::Tree;
 use crate::update::{self, Updater};
@@ -58,8 +58,17 @@ pub enum Cmd {
     ToggleFind,
     ToggleTerminal,
     NewTerminal,
+    /// Close a whole terminal tab, splits and all.
     CloseTerminal(usize),
     SelectTerminal(usize),
+    /// Start another terminal beside the active one, in the same tab.
+    SplitTerminal,
+    /// Close one split of the active tab.
+    ClosePane(usize),
+    /// Give the keyboard to one split of the active tab.
+    FocusPane(usize),
+    /// Move the terminal panel to the bottom or the right of the window.
+    DockTerminal(TerminalDock),
     AskDiscardAll,
     AskDropStash(Stash),
     /// Show a commit from the history.
@@ -1066,6 +1075,20 @@ impl App {
             if i.consume_shortcut(&shifted(Key::Backtick)) {
                 cmds.push(Cmd::NewTerminal);
             }
+            if self.repo.is_some() && i.consume_shortcut(&split_shortcut()) {
+                cmds.push(Cmd::SplitTerminal);
+            }
+            // Moving between splits, only while one of them has the keyboard.
+            if let Some(repo) = &mut self.repo
+                && repo.terminals.open
+                && repo.terminals.focused
+            {
+                for (key, forward) in [(Key::ArrowLeft, false), (Key::ArrowRight, true)] {
+                    if i.consume_shortcut(&focus_pane_shortcut(key)) {
+                        repo.terminals.cycle_pane(forward);
+                    }
+                }
+            }
             // Shift variants first: a plain Ctrl+F pattern also matches Ctrl+Shift+F.
             if i.consume_shortcut(&shifted(Key::F)) {
                 cmds.push(Cmd::FocusSearch);
@@ -1207,7 +1230,7 @@ impl App {
                 }
             }
             (Cmd::ToggleTerminal, Some(repo)) => {
-                if repo.terminals.list.is_empty() {
+                if repo.terminals.tabs.is_empty() {
                     if let Err(e) = repo.terminals.add(&repo.root, &self.settings.shell, ctx) {
                         self.toast = Some(Toast::error(e, now));
                     }
@@ -1223,9 +1246,27 @@ impl App {
                 repo.terminals.grab_focus = true;
             }
             (Cmd::CloseTerminal(index), Some(repo)) => repo.terminals.close(index),
-            (Cmd::SelectTerminal(index), Some(repo)) => {
-                repo.terminals.active = index.min(repo.terminals.list.len().saturating_sub(1));
+            (Cmd::SelectTerminal(index), Some(repo)) => repo.terminals.select(index, None),
+            (Cmd::SplitTerminal, Some(repo)) => {
+                if let Err(e) = repo.terminals.split(&repo.root, &self.settings.shell, ctx) {
+                    self.toast = Some(Toast::error(e, now));
+                }
                 repo.terminals.grab_focus = true;
+            }
+            (Cmd::ClosePane(pane), Some(repo)) => {
+                let tab = repo.terminals.active;
+                repo.terminals.close_pane(tab, pane);
+                repo.terminals.grab_focus = repo.terminals.open;
+            }
+            (Cmd::FocusPane(pane), Some(repo)) => {
+                let tab = repo.terminals.active;
+                repo.terminals.select(tab, Some(pane));
+            }
+            (Cmd::DockTerminal(dock), _) => {
+                self.settings.terminal_dock = dock;
+                if let Some(repo) = &mut self.repo {
+                    repo.terminals.grab_focus = repo.terminals.open;
+                }
             }
             (Cmd::AskDiscardAll, Some(repo)) => repo.confirm_discard_all = true,
             (Cmd::AskDropStash(stash), Some(repo)) => repo.confirm_drop_stash = Some(stash),
@@ -1273,6 +1314,23 @@ impl App {
             (_, None) => {}
         }
     }
+}
+
+/// Splits the terminal: Ctrl+Shift+5 as in VS Code, or Cmd+\ on macOS,
+/// where Cmd+Shift+5 belongs to the system's screenshot tool.
+pub fn split_shortcut() -> egui::KeyboardShortcut {
+    use egui::{Key, KeyboardShortcut, Modifiers};
+    if cfg!(target_os = "macos") {
+        KeyboardShortcut::new(Modifiers::COMMAND, Key::Backslash)
+    } else {
+        KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Num5)
+    }
+}
+
+/// Moves the keyboard to the split on that side: Ctrl+Alt (Cmd+Option on
+/// macOS) and an arrow. Ctrl+arrow alone still moves by word in the shell.
+pub fn focus_pane_shortcut(key: egui::Key) -> egui::KeyboardShortcut {
+    egui::KeyboardShortcut::new(egui::Modifiers::COMMAND | egui::Modifiers::ALT, key)
 }
 
 impl eframe::App for App {

@@ -46,6 +46,16 @@ impl Accent {
     }
 }
 
+/// Where the terminal panel sits in the window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TerminalDock {
+    /// Under the content, across its full width.
+    #[default]
+    Bottom,
+    /// Beside the content, down its full height.
+    Right,
+}
+
 /// A theme the user imported, kept as the CSS it came from.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CustomTheme {
@@ -92,6 +102,8 @@ pub struct Settings {
 
     /// The program new terminals run. Empty means the system's usual shell.
     pub shell: String,
+    /// Where the terminal panel sits.
+    pub terminal_dock: TerminalDock,
 
     /// Fetch from the remote every few minutes, so new branches and commits
     /// show up without asking.
@@ -127,6 +139,7 @@ impl Default for Settings {
             insert_spaces: true,
             auto_save: false,
             shell: String::new(),
+            terminal_dock: TerminalDock::Bottom,
             auto_fetch: true,
             blame: true,
             history_open: false,

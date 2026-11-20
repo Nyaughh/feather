@@ -9,8 +9,8 @@ use eframe::egui::{
 
 use super::virtual_rows;
 use super::widgets::{
-    ButtonKind, button, elided, empty_state, icon_button, menu_item, paint_galley, paint_icon,
-    paint_row_bg, popup_frame,
+    ButtonKind, button, elided, empty_state, icon_button, menu_item, menu_separator, paint_galley,
+    paint_icon, paint_row_bg, popup_frame,
 };
 use crate::app::{Cmd, Repo, Tab, View};
 use crate::git::{Branch, Change, ChangeKind, Commit, Stash};
@@ -736,15 +736,6 @@ fn plain_item(ui: &mut Ui, label: &str, enabled: bool, why_not: &str) -> bool {
         }
         false
     }
-}
-
-fn menu_separator(ui: &mut Ui) {
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 9.0), Sense::hover());
-    ui.painter().hline(
-        rect.x_range().shrink(4.0),
-        rect.center().y,
-        Stroke::new(1.0, theme::border()),
-    );
 }
 
 /// A small heading inside a menu.

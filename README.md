@@ -17,6 +17,8 @@ A fast, minimal desktop app for browsing a repository and handling everyday git.
 - **Search**: text across the repository, find in the open file, and quick open
   by file name.
 - **Terminal**: tabbed terminals in the repository folder, inside the window.
+  Split a tab to run shells side by side, and dock the panel at the bottom or
+  on the right from its `...` menu.
 - **Themes**: eight built in, each light and dark, and any tweakcn or shadcn/ui
   theme can be pasted in. Plus accent colour, font size, line wrap and indentation.
 - **Blame**: who last changed the current line, beside the line and in the status
@@ -81,6 +83,8 @@ The optimized binary is written to `target/release/feather`.
 | `Ctrl+S`         | Save the file being edited     |
 | `` Ctrl+` ``     | Show or hide the terminal      |
 | `` Ctrl+Shift+` `` | New terminal                 |
+| `Ctrl+Shift+5`   | Split the terminal (`Cmd+\` on macOS) |
+| `Ctrl+Alt+Left` `Right` | Previous or next split  |
 | `Ctrl+1` `2` `3` | Files, Search and Git tabs     |
 | `Ctrl+Enter`     | Commit (in the Git tab)        |
 | `Ctrl+B`         | Hide or show the sidebar       |

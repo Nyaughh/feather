@@ -195,6 +195,16 @@ pub fn menu_item(
     response
 }
 
+/// A thin line between groups of items in a popup menu.
+pub fn menu_separator(ui: &mut Ui) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 9.0), Sense::hover());
+    ui.painter().hline(
+        rect.x_range().shrink(4.0),
+        rect.center().y,
+        Stroke::new(1.0, theme::border()),
+    );
+}
+
 /// A two-option segmented control. Returns the newly chosen index, if any.
 pub fn segmented(ui: &mut Ui, id: Id, labels: &[&str], selected: usize) -> Option<usize> {
     let font = theme::medium_font(12.0);

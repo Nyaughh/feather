@@ -9,6 +9,7 @@ use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_s
 use std::io::{Read, Write};
 use std::num::NonZeroU16;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 
 /// Lines kept above the visible screen.
@@ -64,6 +65,9 @@ impl vt100::Callbacks for Replies {
 pub type Cell = (u16, u16);
 
 pub struct Terminal {
+    /// Stays the same for as long as the terminal runs, so the keyboard focus
+    /// follows it when the terminals around it close.
+    pub id: u64,
     /// Short name for its tab, e.g. `bash`.
     pub title: String,
     parser: vt100::Parser<Replies>,
@@ -167,7 +171,9 @@ impl Terminal {
             });
         }
 
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
         Ok(Self {
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             title,
             parser: vt100::Parser::new_with_callbacks(
                 nz(rows),
@@ -235,7 +241,7 @@ impl Terminal {
         });
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn size(&self) -> (u16, u16) {
         self.size
     }
@@ -268,15 +274,43 @@ fn nz(value: u16) -> NonZeroU16 {
     NonZeroU16::new(value.max(1)).unwrap_or(NonZeroU16::MIN)
 }
 
+/// Which active item is left after removing `removed` from a list that used to
+/// hold `remaining + 1` items: the same one if it is still there, otherwise
+/// the one that took its place (or the new last one).
+fn active_after_removal(active: usize, removed: usize, remaining: usize) -> usize {
+    let active = if removed < active { active - 1 } else { active };
+    active.min(remaining.saturating_sub(1))
+}
+
+/// One tab of the terminal panel: one terminal, or several side by side.
+pub struct Group {
+    pub panes: Vec<Terminal>,
+    /// The pane that gets the keyboard when the tab is shown.
+    pub active: usize,
+}
+
+impl Group {
+    /// What the tab is called: the program in each of its panes.
+    pub fn title(&self) -> String {
+        let titles: Vec<&str> = self.panes.iter().map(|p| p.title.as_str()).collect();
+        titles.join(", ")
+    }
+
+    /// Whether every program in the tab has ended.
+    pub fn exited(&self) -> bool {
+        self.panes.iter().all(|p| p.exited)
+    }
+}
+
 /// The terminals belonging to one repository, shown as tabs in a panel.
 #[derive(Default)]
 pub struct Terminals {
-    pub list: Vec<Terminal>,
+    pub tabs: Vec<Group>,
     pub active: usize,
     pub open: bool,
-    /// Whether the terminal had the keyboard on the last frame.
+    /// Whether a terminal had the keyboard on the last frame.
     pub focused: bool,
-    /// Give the terminal the keyboard on the next frame.
+    /// Give the active terminal the keyboard on the next frame.
     pub grab_focus: bool,
 }
 
@@ -284,24 +318,85 @@ impl Terminals {
     /// Opens a new terminal tab and shows the panel.
     pub fn add(&mut self, cwd: &Path, shell: &str, ctx: &egui::Context) -> Result<(), String> {
         let terminal = Terminal::spawn(cwd, shell, ctx)?;
-        self.list.push(terminal);
-        self.active = self.list.len() - 1;
+        self.tabs.push(Group {
+            panes: vec![terminal],
+            active: 0,
+        });
+        self.active = self.tabs.len() - 1;
         self.open = true;
         Ok(())
     }
 
+    /// Starts another terminal beside the active one, in the same tab.
+    pub fn split(&mut self, cwd: &Path, shell: &str, ctx: &egui::Context) -> Result<(), String> {
+        let Some(group) = self.tabs.get_mut(self.active) else {
+            return self.add(cwd, shell, ctx);
+        };
+        let terminal = Terminal::spawn(cwd, shell, ctx)?;
+        group.active += 1;
+        group.panes.insert(group.active, terminal);
+        self.open = true;
+        Ok(())
+    }
+
+    /// Closes a whole tab, ending every terminal in it.
     pub fn close(&mut self, index: usize) {
-        if index < self.list.len() {
-            self.list.remove(index);
-            self.active = self.active.min(self.list.len().saturating_sub(1));
+        if index < self.tabs.len() {
+            self.tabs.remove(index);
+            self.active = active_after_removal(self.active, index, self.tabs.len());
         }
-        if self.list.is_empty() {
+        if self.tabs.is_empty() {
             self.open = false;
         }
     }
 
+    /// Closes one pane of a tab; the tab goes with its last pane.
+    pub fn close_pane(&mut self, tab: usize, pane: usize) {
+        let Some(group) = self.tabs.get_mut(tab) else {
+            return;
+        };
+        if group.panes.len() <= 1 {
+            self.close(tab);
+            return;
+        }
+        if pane < group.panes.len() {
+            group.panes.remove(pane);
+            group.active = active_after_removal(group.active, pane, group.panes.len());
+        }
+    }
+
+    /// Shows a tab, with the keyboard in `pane` if given.
+    pub fn select(&mut self, tab: usize, pane: Option<usize>) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        self.active = tab.min(self.tabs.len() - 1);
+        let group = &mut self.tabs[self.active];
+        if let Some(pane) = pane {
+            group.active = pane.min(group.panes.len().saturating_sub(1));
+        }
+        self.grab_focus = true;
+    }
+
+    /// Moves the keyboard to the next pane of the active tab (or the previous
+    /// one, with `forward` false), wrapping around at the ends.
+    pub fn cycle_pane(&mut self, forward: bool) {
+        let Some(group) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        let count = group.panes.len();
+        if count > 1 {
+            group.active = if forward {
+                (group.active + 1) % count
+            } else {
+                (group.active + count - 1) % count
+            };
+            self.grab_focus = true;
+        }
+    }
+
     pub fn pump(&mut self) {
-        for terminal in &mut self.list {
+        for terminal in self.tabs.iter_mut().flat_map(|t| t.panes.iter_mut()) {
             terminal.pump();
         }
     }
@@ -370,6 +465,24 @@ pub fn key_bytes(
         _ => return None,
     };
     Some(sequence.to_vec())
+}
+
+#[cfg(test)]
+mod removal_tests {
+    use super::active_after_removal;
+
+    #[test]
+    fn keeps_the_active_item_when_another_closes() {
+        // Closing one before it: the same item, now one place earlier.
+        assert_eq!(active_after_removal(2, 0, 3), 1);
+        // Closing one after it changes nothing.
+        assert_eq!(active_after_removal(1, 3, 3), 1);
+        // Closing the active one moves to the one that took its place...
+        assert_eq!(active_after_removal(1, 1, 2), 1);
+        // ...or to the new last one, if it was last.
+        assert_eq!(active_after_removal(2, 2, 2), 1);
+        assert_eq!(active_after_removal(0, 0, 0), 0);
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -458,6 +571,53 @@ mod tests {
             "screen was: {:?}",
             terminal.screen().contents()
         );
+    }
+
+    #[test]
+    fn splits_and_closes_terminals_in_a_tab() {
+        let ctx = egui::Context::default();
+        let dir = std::env::temp_dir();
+        let mut terminals = Terminals::default();
+        terminals.add(&dir, "/bin/sh", &ctx).expect("spawn sh");
+        terminals.split(&dir, "/bin/sh", &ctx).expect("split");
+        terminals.split(&dir, "/bin/sh", &ctx).expect("split again");
+        assert!(terminals.open);
+        assert_eq!(terminals.tabs.len(), 1);
+        let ids: Vec<u64> = terminals.tabs[0].panes.iter().map(|p| p.id).collect();
+        assert_eq!(ids.len(), 3);
+        // Each split is a shell of its own, and the newest has the keyboard.
+        assert!(ids[0] != ids[1] && ids[1] != ids[2]);
+        assert_eq!(terminals.tabs[0].active, 2);
+        assert_eq!(terminals.tabs[0].title(), "sh, sh, sh");
+
+        // Each one runs and answers on its own.
+        for (i, pane) in terminals.tabs[0].panes.iter_mut().enumerate() {
+            pane.send(format!("echo pane-{i}-ok\r").as_bytes());
+        }
+        for (i, pane) in terminals.tabs[0].panes.iter_mut().enumerate() {
+            let expected = format!("pane-{i}-ok");
+            assert!(wait_for(pane, |t| t
+                .screen()
+                .contents()
+                .lines()
+                .any(|line| line.trim() == expected)));
+        }
+
+        terminals.cycle_pane(true);
+        assert_eq!(terminals.tabs[0].active, 0);
+        terminals.cycle_pane(false);
+        assert_eq!(terminals.tabs[0].active, 2);
+
+        // Closing a split keeps the others, and the tab, running.
+        terminals.select(0, Some(1));
+        terminals.close_pane(0, 0);
+        let left: Vec<u64> = terminals.tabs[0].panes.iter().map(|p| p.id).collect();
+        assert_eq!(left, [ids[1], ids[2]]);
+        assert_eq!(terminals.tabs[0].active, 0, "still the same terminal");
+        terminals.close_pane(0, 0);
+        terminals.close_pane(0, 0);
+        assert!(terminals.tabs.is_empty());
+        assert!(!terminals.open);
     }
 
     #[test]

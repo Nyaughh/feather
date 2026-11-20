@@ -303,6 +303,10 @@ pub mod icon {
     pub const INFO: &str = "\u{E2CE}";
     pub const SEARCH: &str = "\u{E30C}";
     pub const TERMINAL: &str = "\u{EAE8}";
+    pub const SPLIT_COLUMNS: &str = "\u{E870}";
+    pub const SPLIT_ROWS: &str = "\u{E874}";
+    pub const DOCK_BOTTOM: &str = "\u{EB16}";
+    pub const DOCK_RIGHT: &str = "\u{E462}";
     pub const MORE: &str = "\u{E1FE}";
     pub const CLOUD: &str = "\u{E1AA}";
     pub const TAG: &str = "\u{E478}";
