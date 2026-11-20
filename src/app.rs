@@ -1079,9 +1079,15 @@ impl App {
                 cmds.push(Cmd::SplitTerminal);
             }
             // Moving between splits, only while one of them has the keyboard.
+            // Otherwise these keys stay the shell's (word movement).
             if let Some(repo) = &mut self.repo
                 && repo.terminals.open
                 && repo.terminals.focused
+                && repo
+                    .terminals
+                    .tabs
+                    .get(repo.terminals.active)
+                    .is_some_and(|tab| tab.panes.len() > 1)
             {
                 for (key, forward) in [(Key::ArrowLeft, false), (Key::ArrowRight, true)] {
                     if i.consume_shortcut(&focus_pane_shortcut(key)) {

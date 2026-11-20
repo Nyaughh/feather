@@ -3,7 +3,8 @@
 
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, CursorIcon, Event, EventFilter, Id, Popup, Rect,
-    RectAlign, Sense, Stroke, StrokeKind, Ui, pos2, vec2,
+    RectAlign, ScrollArea, Sense, Stroke, StrokeKind, Ui, UiBuilder,
+    containers::scroll_area::ScrollBarVisibility, pos2, vec2,
 };
 
 use super::widgets::{
@@ -12,7 +13,7 @@ use super::widgets::{
 };
 use crate::app::{Cmd, Repo, focus_pane_shortcut, split_shortcut};
 use crate::settings::TerminalDock;
-use crate::terminal::{Cell, Terminal, key_bytes};
+use crate::terminal::{Cell, Terminal, Terminals, key_bytes};
 use crate::theme::{self, icon, syntax};
 use crate::themes::mix;
 
@@ -34,9 +35,14 @@ pub fn show(ui: &mut Ui, repo: &mut Repo, dock: TerminalDock, cmds: &mut Vec<Cmd
         return;
     };
 
+    // Moving the keyboard to another split takes it from the old one before
+    // either is drawn, so the old one can't take this frame's keys as well.
+    if grab_focus && let Some(terminal) = group.panes.get(group.active) {
+        ui.memory_mut(|m| m.request_focus(screen_id(terminal)));
+    }
+
     let split = group.panes.len() > 1;
     let rects = pane_rects(body, group.panes.len(), dock);
-    let mut focused_pane = None;
     for (i, (terminal, &rect)) in group.panes.iter_mut().zip(&rects).enumerate() {
         let active_pane = i == group.active;
         let mut screen_rect = rect;
@@ -45,9 +51,30 @@ pub fn show(ui: &mut Ui, repo: &mut Repo, dock: TerminalDock, cmds: &mut Vec<Cmd
             pane_header(ui, header, terminal, i, active_pane, cmds);
             screen_rect.min.y = header.bottom();
         }
-        if screen(ui, screen_rect, terminal, grab_focus && active_pane) {
-            focused_pane = Some(i);
-        }
+        screen(ui, screen_rect, terminal);
+    }
+
+    // Keys go to the one split holding the focus once every split has had its
+    // say (a click can move it partway through the frame), never to two.
+    let focused_pane = group
+        .panes
+        .iter()
+        .position(|t| ui.memory(|m| m.has_focus(screen_id(t))));
+    if let Some(i) = focused_pane {
+        let terminal = &mut group.panes[i];
+        // Tab, arrows and Escape belong to the shell, not to moving focus.
+        ui.memory_mut(|m| {
+            m.set_focus_lock_filter(
+                screen_id(terminal),
+                EventFilter {
+                    tab: true,
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    escape: true,
+                },
+            );
+        });
+        keyboard(ui, terminal);
     }
     // Lines between the splits.
     let stroke = Stroke::new(1.0, theme::border());
@@ -163,31 +190,95 @@ fn tabs(ui: &mut Ui, repo: &Repo, dock: TerminalDock, cmds: &mut Vec<Cmd>) {
         Stroke::new(1.0, theme::border()),
     );
     let mid = rect.center().y;
-    let terminals = &repo.terminals;
+
+    // The buttons at the right end keep their place. The tabs, and the + after
+    // them, scroll sideways in the room left when they don't all fit.
+    let strip = Rect::from_min_max(
+        rect.min,
+        pos2(
+            (rect.right() - TAB_BUTTONS_WIDTH).max(rect.left()),
+            rect.bottom(),
+        ),
+    );
+    let mut strip_ui = ui.new_child(UiBuilder::new().max_rect(strip));
+    strip_ui.style_mut().always_scroll_the_only_direction = true;
+    ScrollArea::horizontal()
+        .id_salt("terminal_tabs")
+        .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
+        .auto_shrink(false)
+        .show(&mut strip_ui, |ui| tab_list(ui, &repo.terminals, cmds));
+
+    let slot = |n: f32| {
+        Rect::from_center_size(pos2(rect.right() - 20.0 - n * 28.0, mid), vec2(24.0, 24.0))
+    };
+    let hide_icon = match dock {
+        TerminalDock::Bottom => icon::CARET_DOWN,
+        TerminalDock::Right => icon::CARET_RIGHT,
+    };
+    if icon_button(
+        ui,
+        slot(0.0),
+        Id::unique("terminal_hide"),
+        hide_icon,
+        "Hide the terminal (it keeps running)",
+    )
+    .clicked()
+    {
+        cmds.push(Cmd::ToggleTerminal);
+    }
+    more_menu(ui, slot(1.0), repo, dock, cmds);
+    let split_tip = format!(
+        "Split the terminal ({})",
+        ui.ctx().format_shortcut(&split_shortcut())
+    );
+    if icon_button(
+        ui,
+        slot(2.0),
+        Id::unique("terminal_split"),
+        split_icon(dock),
+        &split_tip,
+    )
+    .clicked()
+    {
+        cmds.push(Cmd::SplitTerminal);
+    }
+}
+
+/// The tabs and the + after them, inside the strip's scroll area.
+fn tab_list(ui: &mut Ui, terminals: &Terminals, cmds: &mut Vec<Cmd>) {
+    ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+    let labels: Vec<_> = terminals
+        .tabs
+        .iter()
+        .enumerate()
+        .map(|(i, group)| {
+            elided(
+                ui,
+                &format!("{}: {}", i + 1, group.title()),
+                theme::ui_font(12.5),
+                if i == terminals.active {
+                    theme::text()
+                } else {
+                    theme::text_secondary()
+                },
+                140.0,
+            )
+        })
+        .collect();
+    let width = 8.0 + labels.iter().map(|l| l.size().x + 46.0).sum::<f32>() + 36.0;
+    let (rect, _) = ui.allocate_exact_size(vec2(width, TABS_HEIGHT), Sense::hover());
+    let mid = rect.center().y;
     let mut x = rect.left() + 8.0;
 
-    // The tabs share what the buttons leave, so a narrow panel shows them all.
-    let room = rect.right() - TAB_BUTTONS_WIDTH - 36.0 - x;
-    let count = terminals.tabs.len().max(1) as f32;
-    let label_width = (room / count - 46.0).clamp(24.0, 140.0);
-
-    for (i, group) in terminals.tabs.iter().enumerate() {
-        let label = format!("{}: {}", i + 1, group.title());
-        let text = elided(
-            ui,
-            &label,
-            theme::ui_font(12.5),
-            if i == terminals.active {
-                theme::text()
-            } else {
-                theme::text_secondary()
-            },
-            label_width,
-        );
+    for (i, (group, text)) in terminals.tabs.iter().zip(labels).enumerate() {
         let tab = Rect::from_min_size(
             pos2(x, rect.top() + 5.0),
             vec2(text.size().x + 42.0, rect.height() - 10.0),
         );
+        // A tab just opened or picked comes into view.
+        if i == terminals.active && terminals.grab_focus {
+            ui.scroll_to_rect(tab, None);
+        }
         let response = ui
             .interact(tab, Id::unique(("terminal_tab", i)), Sense::click())
             .on_hover_cursor(CursorIcon::PointingHand);
@@ -233,42 +324,6 @@ fn tabs(ui: &mut Ui, repo: &Repo, dock: TerminalDock, cmds: &mut Vec<Cmd>) {
     {
         cmds.push(Cmd::NewTerminal);
     }
-
-    // The right end: split, more options, hide.
-    let slot = |n: f32| {
-        Rect::from_center_size(pos2(rect.right() - 20.0 - n * 28.0, mid), vec2(24.0, 24.0))
-    };
-    let hide_icon = match dock {
-        TerminalDock::Bottom => icon::CARET_DOWN,
-        TerminalDock::Right => icon::CARET_RIGHT,
-    };
-    if icon_button(
-        ui,
-        slot(0.0),
-        Id::unique("terminal_hide"),
-        hide_icon,
-        "Hide the terminal (it keeps running)",
-    )
-    .clicked()
-    {
-        cmds.push(Cmd::ToggleTerminal);
-    }
-    more_menu(ui, slot(1.0), repo, dock, cmds);
-    let split_tip = format!(
-        "Split the terminal ({})",
-        ui.ctx().format_shortcut(&split_shortcut())
-    );
-    if icon_button(
-        ui,
-        slot(2.0),
-        Id::unique("terminal_split"),
-        split_icon(dock),
-        &split_tip,
-    )
-    .clicked()
-    {
-        cmds.push(Cmd::SplitTerminal);
-    }
 }
 
 /// Splits sit side by side under the content, one above the other on the right.
@@ -301,6 +356,13 @@ fn more_menu(ui: &Ui, rect: Rect, repo: &Repo, dock: TerminalDock, cmds: &mut Ve
         .show(|ui| {
             ui.set_width(260.0);
             ui.spacing_mut().item_spacing.y = 0.0;
+            let new = ctx.format_shortcut(&egui::KeyboardShortcut::new(
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                egui::Key::Backtick,
+            ));
+            if menu_item(ui, Some(icon::PLUS), "New Terminal", Some(&new), false).clicked() {
+                cmds.push(Cmd::NewTerminal);
+            }
             let shortcut = ctx.format_shortcut(&split_shortcut());
             if menu_item(
                 ui,
@@ -324,6 +386,16 @@ fn more_menu(ui: &Ui, rect: Rect, repo: &Repo, dock: TerminalDock, cmds: &mut Ve
                 }
                 if menu_item(ui, Some(icon::CLOSE), "Close Split", None, false).clicked() {
                     cmds.push(Cmd::ClosePane(active));
+                }
+            }
+            if terminals.tabs.len() > 1 {
+                menu_separator(ui);
+                for (i, tab) in terminals.tabs.iter().enumerate() {
+                    let label = format!("{}: {}", i + 1, tab.title());
+                    let current = i == terminals.active;
+                    if menu_item(ui, Some(icon::TERMINAL), &label, None, current).clicked() {
+                        cmds.push(Cmd::SelectTerminal(i));
+                    }
                 }
             }
             menu_separator(ui);
@@ -399,29 +471,19 @@ fn in_selection(selection: Option<(Cell, Cell)>, cell: Cell) -> bool {
     cell >= start && cell <= end
 }
 
-/// Draws the terminal into `rect` and passes it the keyboard. Returns whether
-/// it has focus.
-fn screen(ui: &mut Ui, rect: Rect, terminal: &mut Terminal, grab_focus: bool) -> bool {
-    let id = Id::unique(("terminal_screen", terminal.id));
+/// The widget id that holds the keyboard focus for `terminal`.
+fn screen_id(terminal: &Terminal) -> Id {
+    Id::unique(("terminal_screen", terminal.id))
+}
+
+/// Draws the terminal into `rect`, and takes the focus when it is clicked.
+fn screen(ui: &mut Ui, rect: Rect, terminal: &mut Terminal) {
+    let id = screen_id(terminal);
     let response = ui.interact(rect, id, Sense::click_and_drag());
-    if response.clicked() || response.drag_started() || grab_focus {
+    if response.clicked() || response.drag_started() {
         ui.memory_mut(|m| m.request_focus(id));
     }
     let focused = ui.memory(|m| m.has_focus(id));
-    if focused {
-        // Tab, arrows and Escape belong to the shell, not to moving focus.
-        ui.memory_mut(|m| {
-            m.set_focus_lock_filter(
-                id,
-                EventFilter {
-                    tab: true,
-                    horizontal_arrows: true,
-                    vertical_arrows: true,
-                    escape: true,
-                },
-            );
-        });
-    }
 
     // Fit the grid to the panel.
     let font = theme::code_font();
@@ -462,10 +524,6 @@ fn screen(ui: &mut Ui, rect: Rect, terminal: &mut Terminal, grab_focus: bool) ->
             let lines = if lines == 0.0 { scroll.signum() } else { lines };
             terminal.scroll(lines as i32);
         }
-    }
-
-    if focused {
-        keyboard(ui, terminal);
     }
 
     // Paint.
@@ -599,7 +657,6 @@ fn screen(ui: &mut Ui, rect: Rect, terminal: &mut Terminal, grab_focus: bool) ->
             theme::text_muted(),
         );
     }
-    focused
 }
 
 /// Passes this frame's key presses, typed text and pastes to the shell.

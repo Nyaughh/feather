@@ -22,6 +22,17 @@ use crate::update::{self, Updater};
 use crate::worker::Action;
 use widgets::{ButtonKind, button, elided, paint_galley, paint_icon, paint_row_bg, popup_frame};
 
+/// How narrow the terminal docked on the right may make the content beside it.
+const MIN_CONTENT_WIDTH: f32 = 200.0;
+
+/// The starting width and the allowed widths of the terminal docked on the
+/// right, given the width it shares with the content. It never grows so wide
+/// that the content beside it disappears, even in a small window.
+fn right_dock_size(available: f32) -> (f32, std::ops::RangeInclusive<f32>) {
+    let most = (available - MIN_CONTENT_WIDTH).clamp(0.0, 1000.0);
+    (440.0_f32.min(most), 260.0_f32.min(most)..=most)
+}
+
 pub fn root(app: &mut App, ui: &mut Ui, cmds: &mut Vec<Cmd>) {
     let ctx = ui.ctx().clone();
     titlebar::show(
@@ -54,9 +65,12 @@ pub fn root(app: &mut App, ui: &mut Ui, cmds: &mut Vec<Cmd>) {
                     TerminalDock::Bottom => Panel::bottom("terminal_panel")
                         .default_size(260.0)
                         .size_range(110.0..=640.0),
-                    TerminalDock::Right => Panel::right("terminal_panel_right")
-                        .default_size(440.0)
-                        .size_range(260.0..=1000.0),
+                    TerminalDock::Right => {
+                        let (default, range) = right_dock_size(ui.available_width());
+                        Panel::right("terminal_panel_right")
+                            .default_size(default)
+                            .size_range(range)
+                    }
                 };
                 panel
                     .resizable(true)
@@ -701,5 +715,26 @@ fn toast_ui(ctx: &egui::Context, toast: &mut Option<Toast>) {
         });
     if dismiss {
         *toast = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_right_dock_leaves_room_for_the_content() {
+        // A roomy window: the usual sizes.
+        assert_eq!(right_dock_size(1400.0), (440.0, 260.0..=1000.0));
+        // 640 wide with the sidebar open leaves 376: the terminal gets what the
+        // content can spare, and no more.
+        let (default, range) = right_dock_size(376.0);
+        assert_eq!(default, 176.0);
+        assert_eq!(range, 176.0..=176.0);
+        assert!(376.0 - range.end() >= MIN_CONTENT_WIDTH);
+        let (default, range) = right_dock_size(600.0);
+        assert_eq!((default, range), (400.0, 260.0..=400.0));
+        // No room at all.
+        assert_eq!(right_dock_size(100.0), (0.0, 0.0..=0.0));
     }
 }
