@@ -273,11 +273,6 @@ pub fn open_elsewhere(folder: &Path) -> bool {
     offer(&[Want::Peek], Some(&Target::Folder(folder.to_owned())))
 }
 
-/// Whether any other window of this program is open.
-pub fn others_running() -> bool {
-    offer(&[Want::Ping], None)
-}
-
 /// How asking one window went.
 #[derive(Debug, PartialEq, Eq)]
 enum Outcome {

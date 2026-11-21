@@ -89,6 +89,7 @@ fn main() -> eframe::Result {
         new_window: options.window == WindowChoice::New || error.is_some(),
         target: initial,
         error,
+        owns_window_state: store::claim_window_state(),
     })
 }
 
@@ -107,12 +108,19 @@ fn run(startup: app::Startup) -> eframe::Result {
         viewport = viewport.with_icon(icon);
     }
 
+    // eframe rewrites its saved state whole, so only one window keeps it.
+    // The others start where the system puts them, rather than exactly on
+    // top of that window, and never write it.
+    let owner = startup.owns_window_state;
     let options = eframe::NativeOptions {
         viewport: ui::titlebar::configure(viewport),
         renderer: eframe::Renderer::Glow,
-        // A window opened beside others starts where the system puts it,
-        // rather than exactly on top of the one whose place was saved.
-        persist_window: !instance::others_running(),
+        persist_window: owner,
+        persistence_path: if owner {
+            None
+        } else {
+            store::spare_window_state()
+        },
         ..Default::default()
     };
     eframe::run_native(

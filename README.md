@@ -165,7 +165,7 @@ Each window is its own process, so closing one leaves the rest running and
 quitting the last one quits Feather. The windows share one settings file: a
 window writes only the settings it changed and picks up the others' changes,
 including the list of recent folders. Starting Feather with no folder reopens
-the folder of the window closed last, unless another window is already open, in
+the folder of the window closed last, unless another window already shows it, in
 which case it starts on the home screen.
 
 Feather shells out to `git` rather than linking a git library, so commits use your

@@ -958,6 +958,9 @@ pub struct Startup {
     pub new_window: bool,
     /// Why the path on the command line couldn't be opened, to show.
     pub error: Option<String>,
+    /// This window looks after eframe's saved state (`app.ron`); see
+    /// [`store::claim_window_state`].
+    pub owns_window_state: bool,
 }
 
 pub struct App {
@@ -983,12 +986,19 @@ pub struct App {
     was_focused: bool,
     /// Set once the user has agreed to close with (or without) saving.
     closing: bool,
+    /// Whether this window writes eframe's saved state.
+    owns_window_state: bool,
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, startup: Startup) -> Self {
-        // Settings saved by versions before the shared file came in.
-        let older: Option<Settings> = cc.storage.and_then(|s| eframe::get_value(s, SETTINGS_KEY));
+        // Settings saved by versions before the shared file came in. Only
+        // the window that owns eframe's state reads them: the others don't
+        // see that file.
+        let older: Option<Settings> = cc
+            .storage
+            .filter(|_| startup.owns_window_state)
+            .and_then(|s| eframe::get_value(s, SETTINGS_KEY));
         let (store, settings) = Store::open(store::default_path(), older);
 
         theme::install_fonts(&cc.egui_ctx);
@@ -1018,6 +1028,7 @@ impl App {
             command_job: None,
             was_focused: true,
             closing: false,
+            owns_window_state: startup.owns_window_state,
         };
         if let Some(error) = startup.error {
             app.toast = Some(Toast::error(error, 0.0));
@@ -1428,14 +1439,19 @@ impl App {
                 }
             }
             (Cmd::OpenPickedFile(path), _) => {
+                let target = Target::File(path.clone());
                 let elsewhere = self
                     .repo
                     .as_ref()
-                    .is_some_and(|repo| cli::relative_to(&repo.root, &path).is_none());
-                if !elsewhere {
-                    self.apply(Cmd::OpenPath(Target::File(path)), ctx);
-                } else if let Err(e) = spawn_window(Some(&path)) {
-                    self.toast = Some(Toast::error(e, now));
+                    .is_some_and(|repo| !crate::instance::shows(&repo.root, &target));
+                if elsewhere {
+                    if let Err(e) = spawn_window(Some(&path)) {
+                        self.toast = Some(Toast::error(e, now));
+                    }
+                } else {
+                    // The same as a `feather <file>` handed to this window:
+                    // the file already open is left as it is.
+                    self.apply(Cmd::OpenPath(target), ctx);
                 }
             }
             (Cmd::CloseFolder, _) => self.close_folder(ctx),
@@ -1644,7 +1660,13 @@ impl eframe::App for App {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         self.store.flush(&mut self.settings);
         // Still kept here too, for going back to an older version.
-        eframe::set_value(storage, SETTINGS_KEY, &self.settings);
+        if self.owns_window_state {
+            eframe::set_value(storage, SETTINGS_KEY, &self.settings);
+        }
+    }
+
+    fn persist_egui_memory(&self) -> bool {
+        self.owns_window_state
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
