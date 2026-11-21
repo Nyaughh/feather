@@ -2,28 +2,39 @@
 //! does with VS Code.
 //!
 //! Each running Feather listens on a loopback port and writes the port, its
-//! process id and a random token to a small file in a per-user folder. The
+//! process id and a random secret to a file only this user can read. The
 //! command reads those files, newest first, and asks each window in turn
 //! whether it will take the path. A window says yes when it already shows
 //! that folder (or the repository a file is in), or when it shows nothing.
-//! Without a yes, the command opens a new window. Files whose window has gone
-//! away are deleted as they are found.
+//! Without a yes, the command opens a new window.
+//!
+//! Loopback ports are open to every account on the machine, and a window that
+//! crashed leaves its file behind, so the port it names may since belong to
+//! anything. Each side therefore proves it knows the secret (an HMAC over
+//! fresh nonces from both ends) before the command sends a path, and the
+//! window acts only on a request carrying the command's proof. A port that
+//! can't prove it is forgotten.
 
 use crate::cli::{self, Target, WindowChoice};
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader, Read, Write};
+use sha2::{Digest, Sha256};
+use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Bumped whenever the messages change, so old and new copies leave each other be.
-const PROTOCOL: u32 = 1;
+const PROTOCOL: u32 = 2;
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
-const REPLY_TIMEOUT: Duration = Duration::from_secs(3);
-/// Far more than any request needs.
-const MAX_REQUEST: u64 = 64 * 1024;
+/// For a whole exchange, start to finish, on either side.
+const EXCHANGE_DEADLINE: Duration = Duration::from_secs(2);
+/// Far more than any message needs.
+const MAX_LINE: usize = 64 * 1024;
+/// Connections handled at once; any beyond this are turned away.
+const MAX_CONNECTIONS: usize = 8;
 
 /// What a running window writes about itself.
 #[derive(Serialize, Deserialize)]
@@ -48,13 +59,35 @@ enum Want {
     Any,
     /// Only asking: answers as `Showing` would, but the window does nothing.
     Peek,
+    /// Only asking whether the window is there.
+    Ping,
+}
+
+/// The command's first line: a nonce for the window to prove itself with.
+#[derive(Serialize, Deserialize)]
+struct Hello {
+    nonce: String,
+}
+
+/// The window's answer: its own nonce, and proof that it knows the secret.
+#[derive(Serialize, Deserialize)]
+struct Challenge {
+    nonce: String,
+    proof: String,
+}
+
+/// What the command wants, as JSON in `body`, with the command's proof over
+/// the window's nonce and that exact text.
+#[derive(Serialize, Deserialize)]
+struct Ask {
+    body: String,
+    proof: String,
 }
 
 #[derive(Serialize, Deserialize)]
-struct Ask {
-    token: String,
+struct Request {
     want: Want,
-    target: Target,
+    target: Option<Target>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -76,7 +109,7 @@ pub struct Server {
 
 impl Server {
     /// Starts listening, or returns `None` if there is nowhere to say so.
-    pub fn start(wake: impl Fn() + Send + 'static) -> Option<Self> {
+    pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Option<Self> {
         let dir = registry_dir()?;
         let exe = own_exe()?;
         create_private_dir(&dir).ok()?;
@@ -95,10 +128,15 @@ impl Server {
 
         let root = Arc::new(Mutex::new(None));
         let (tx, rx) = mpsc::channel();
-        let shared = root.clone();
+        let shared = Shared {
+            token,
+            root: root.clone(),
+            tx: Mutex::new(tx),
+            wake: Box::new(wake),
+        };
         std::thread::Builder::new()
             .name("feather-instance".to_owned())
-            .spawn(move || listen(listener, &token, &shared, &tx, &wake))
+            .spawn(move || listen(listener, Arc::new(shared)))
             .ok()?;
         Some(Self {
             root,
@@ -125,42 +163,81 @@ impl Drop for Server {
     }
 }
 
-fn listen(
-    listener: TcpListener,
-    token: &str,
-    root: &Mutex<Option<PathBuf>>,
-    tx: &Sender<Handoff>,
-    wake: &dyn Fn(),
-) {
+/// What every connection handler needs.
+struct Shared {
+    token: String,
+    root: Arc<Mutex<Option<PathBuf>>>,
+    tx: Mutex<Sender<Handoff>>,
+    wake: Box<dyn Fn() + Send + Sync>,
+}
+
+fn listen(listener: TcpListener, shared: Arc<Shared>) {
+    let busy = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
-        let _ = stream.set_read_timeout(Some(REPLY_TIMEOUT));
-        let _ = stream.set_write_timeout(Some(REPLY_TIMEOUT));
-        let mut line = String::new();
-        let mut reader = BufReader::new((&stream).take(MAX_REQUEST));
-        if reader.read_line(&mut line).is_err() {
+        // Each connection gets its own thread and deadline, so one that
+        // stalls holds up nobody else.
+        if busy.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+            busy.fetch_sub(1, Ordering::SeqCst);
             continue;
         }
-        let Ok(ask) = serde_json::from_str::<Ask>(&line) else {
-            continue;
-        };
-        if ask.token != token {
-            continue;
+        let (shared, done) = (shared.clone(), busy.clone());
+        let spawned = std::thread::Builder::new()
+            .name("feather-instance-request".to_owned())
+            .spawn(move || {
+                serve(stream, &shared);
+                done.fetch_sub(1, Ordering::SeqCst);
+            });
+        if spawned.is_err() {
+            busy.fetch_sub(1, Ordering::SeqCst);
         }
-        let current = root.lock().ok().and_then(|r| r.clone());
-        let accepted = accepts(current.as_deref(), ask.want, &ask.target);
-        if accepted && ask.want != Want::Peek && tx.send(Handoff { target: ask.target }).is_ok() {
-            wake();
-        }
-        let reply = serde_json::to_string(&Reply { accepted }).unwrap_or_default();
-        let _ = (&stream).write_all(format!("{reply}\n").as_bytes());
     }
+}
+
+/// One exchange with a command. Says nothing it shouldn't to anyone who
+/// can't prove they know the secret.
+fn serve(stream: TcpStream, shared: &Shared) -> Option<()> {
+    let deadline = Instant::now() + EXCHANGE_DEADLINE;
+    let mut stream = Line::new(stream, deadline);
+    let hello: Hello = serde_json::from_str(&stream.read()?).ok()?;
+    let nonce = new_token();
+    let proof = hmac_hex(&shared.token, &["server", &hello.nonce, &nonce]);
+    stream.write(
+        &serde_json::to_string(&Challenge {
+            nonce: nonce.clone(),
+            proof,
+        })
+        .ok()?,
+    )?;
+
+    let ask: Ask = serde_json::from_str(&stream.read()?).ok()?;
+    let expected = hmac_hex(&shared.token, &["client", &nonce, &ask.body]);
+    if !same(&expected, &ask.proof) {
+        return None;
+    }
+    let request: Request = serde_json::from_str(&ask.body).ok()?;
+    let current = shared.root.lock().ok().and_then(|r| r.clone());
+    let accepted = match &request.target {
+        None => request.want == Want::Ping,
+        Some(target) => accepts(current.as_deref(), request.want, target),
+    };
+    if accepted
+        && !matches!(request.want, Want::Peek | Want::Ping)
+        && let Some(target) = request.target
+        && shared
+            .tx
+            .lock()
+            .is_ok_and(|tx| tx.send(Handoff { target }).is_ok())
+    {
+        (shared.wake)();
+    }
+    stream.write(&serde_json::to_string(&Reply { accepted }).ok()?)
 }
 
 /// Whether a window showing `root` should take `target`.
 fn accepts(root: Option<&Path>, want: Want, target: &Target) -> bool {
     match (want, root) {
-        (Want::Any, _) | (Want::Empty, None) => true,
+        (Want::Any | Want::Ping, _) | (Want::Empty, None) => true,
         (Want::Empty, Some(_)) | (Want::Showing | Want::Peek, None) => false,
         (Want::Showing | Want::Peek, Some(root)) => shows(root, target),
     }
@@ -187,7 +264,7 @@ pub fn hand_off(target: &Target, window: WindowChoice) -> bool {
         WindowChoice::Auto => &[Want::Showing, Want::Empty],
         WindowChoice::Reuse => &[Want::Showing, Want::Any],
     };
-    offer(passes, target)
+    offer(passes, Some(target))
 }
 
 /// Whether another window of this program already shows `folder` (or the
@@ -195,28 +272,27 @@ pub fn hand_off(target: &Target, window: WindowChoice) -> bool {
 // For the multi-window work, which builds on this registry.
 #[allow(dead_code)]
 pub fn open_elsewhere(folder: &Path) -> bool {
-    offer(&[Want::Peek], &Target::Folder(folder.to_owned()))
+    offer(&[Want::Peek], Some(&Target::Folder(folder.to_owned())))
 }
 
 /// Whether any other window of this program is open.
 // For the multi-window work, which builds on this registry.
 #[allow(dead_code)]
 pub fn others_running() -> bool {
-    let (Some(dir), Some(exe)) = (registry_dir(), own_exe()) else {
-        return false;
-    };
-    read_entries(&dir, &exe).into_iter().any(|(file, entry)| {
-        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, entry.port));
-        let alive = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT).is_ok();
-        if !alive {
-            let _ = std::fs::remove_file(&file);
-        }
-        alive
-    })
+    offer(&[Want::Ping], None)
+}
+
+/// How asking one window went.
+#[derive(Debug, PartialEq, Eq)]
+enum Outcome {
+    Accepted,
+    Declined,
+    /// Nothing there, or something that isn't that window.
+    Gone,
 }
 
 /// Asks the other windows, a pass at a time, until one says yes.
-fn offer(passes: &[Want], target: &Target) -> bool {
+fn offer(passes: &[Want], target: Option<&Target>) -> bool {
     let (Some(dir), Some(exe)) = (registry_dir(), own_exe()) else {
         return false;
     };
@@ -225,10 +301,9 @@ fn offer(passes: &[Want], target: &Target) -> bool {
         let mut alive = Vec::new();
         for (file, entry) in entries {
             match ask(&entry, *want, target) {
-                Some(true) => return true,
-                Some(false) => alive.push((file, entry)),
-                // Nothing is listening: that window is gone.
-                None => {
+                Outcome::Accepted => return true,
+                Outcome::Declined => alive.push((file, entry)),
+                Outcome::Gone => {
                     let _ = std::fs::remove_file(&file);
                 }
             }
@@ -271,33 +346,145 @@ fn read_entries(dir: &Path, exe: &Path) -> Vec<(PathBuf, Entry)> {
         .collect()
 }
 
-/// `None` when the window can't be reached at all.
-fn ask(entry: &Entry, want: Want, target: &Target) -> Option<bool> {
+fn ask(entry: &Entry, want: Want, target: Option<&Target>) -> Outcome {
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, entry.port));
-    let mut stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT).ok()?;
+    // A live window's port takes connections in the kernel, however busy
+    // the window is, so failing to connect on loopback means nothing listens.
+    let Ok(stream) = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) else {
+        return Outcome::Gone;
+    };
+    let mut stream = Line::new(stream, Instant::now() + EXCHANGE_DEADLINE);
+
+    // First the window proves itself; only then does it hear the path.
+    let nonce = new_token();
+    let Some(hello) = serde_json::to_string(&Hello {
+        nonce: nonce.clone(),
+    })
+    .ok() else {
+        return Outcome::Gone;
+    };
+    // No answer (a busy window turns connections away, a slow one runs out
+    // of time) says nothing about whether the window is there: keep it.
+    let Some(line) = stream.write(&hello).and_then(|()| stream.read()) else {
+        return Outcome::Declined;
+    };
+    // An answer that isn't a proof of the secret is something else on the
+    // port: the window that wrote this entry has gone.
+    let Ok(challenge) = serde_json::from_str::<Challenge>(&line) else {
+        return Outcome::Gone;
+    };
+    let expected = hmac_hex(&entry.token, &["server", &nonce, &challenge.nonce]);
+    if !same(&expected, &challenge.proof) {
+        return Outcome::Gone;
+    }
+
     // If it takes the path it raises its window, which Windows only allows
     // when we say so.
     #[cfg(windows)]
     cli::windows::allow_foreground(entry.pid);
-    let ask = Ask {
-        token: entry.token.clone(),
+    let request = Request {
         want,
-        target: target.clone(),
+        target: target.cloned(),
     };
-    let reply = (|| {
-        stream.set_read_timeout(Some(REPLY_TIMEOUT)).ok()?;
-        stream.set_write_timeout(Some(REPLY_TIMEOUT)).ok()?;
-        let mut line = serde_json::to_string(&ask).ok()?;
-        line.push('\n');
-        stream.write_all(line.as_bytes()).ok()?;
-        let mut answer = String::new();
-        BufReader::new(stream.take(MAX_REQUEST))
-            .read_line(&mut answer)
+    let Ok(body) = serde_json::to_string(&request) else {
+        return Outcome::Declined;
+    };
+    let proof = hmac_hex(&entry.token, &["client", &challenge.nonce, &body]);
+    let reply = serde_json::to_string(&Ask { body, proof })
+        .ok()
+        .and_then(|line| stream.write(&line))
+        .and_then(|()| stream.read())
+        .and_then(|line| serde_json::from_str::<Reply>(&line).ok());
+    // It proved itself but then didn't answer: busy, so count it as a no.
+    match reply {
+        Some(Reply { accepted: true }) => Outcome::Accepted,
+        _ => Outcome::Declined,
+    }
+}
+
+/// Newline-separated messages over a stream, all within one deadline.
+struct Line {
+    stream: TcpStream,
+    deadline: Instant,
+}
+
+impl Line {
+    fn new(stream: TcpStream, deadline: Instant) -> Self {
+        Self { stream, deadline }
+    }
+
+    fn remaining(&self) -> Option<Duration> {
+        let left = self.deadline.checked_duration_since(Instant::now())?;
+        (!left.is_zero()).then_some(left)
+    }
+
+    /// One message, or `None` at the deadline, at the size limit, on a
+    /// closed connection or on anything that isn't text.
+    fn read(&mut self) -> Option<String> {
+        let mut bytes = Vec::new();
+        let mut byte = [0u8];
+        loop {
+            self.stream.set_read_timeout(Some(self.remaining()?)).ok()?;
+            match self.stream.read(&mut byte) {
+                Ok(0) => return None,
+                Ok(_) if byte[0] == b'\n' => return String::from_utf8(bytes).ok(),
+                Ok(_) if bytes.len() < MAX_LINE => bytes.push(byte[0]),
+                Ok(_) => return None,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return None,
+            }
+        }
+    }
+
+    fn write(&mut self, message: &str) -> Option<()> {
+        self.stream
+            .set_write_timeout(Some(self.remaining()?))
             .ok()?;
-        serde_json::from_str::<Reply>(&answer).ok()
-    })();
-    // Something answered the port but not sensibly: count it as a no.
-    Some(reply.is_some_and(|r| r.accepted))
+        let mut line = message.as_bytes().to_vec();
+        line.push(b'\n');
+        self.stream.write_all(&line).ok()
+    }
+}
+
+/// HMAC-SHA256 (RFC 2104) of `parts`, each ending in a newline, as hex.
+fn hmac_hex(key: &str, parts: &[&str]) -> String {
+    let mut message = Vec::new();
+    for part in parts {
+        message.extend_from_slice(part.as_bytes());
+        message.push(b'\n');
+    }
+    hmac(key.as_bytes(), &message)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+fn hmac(key: &[u8], message: &[u8]) -> [u8; 32] {
+    let mut block = [0u8; 64];
+    if key.len() > block.len() {
+        block[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        block[..key.len()].copy_from_slice(key);
+    }
+    let mut inner = Sha256::new();
+    inner.update(block.map(|b| b ^ 0x36));
+    inner.update(message);
+    let inner = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(block.map(|b| b ^ 0x5c));
+    outer.update(inner);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&outer.finalize());
+    out
+}
+
+/// Compares two proofs without stopping at the first difference.
+fn same(a: &str, b: &str) -> bool {
+    a.len() == b.len()
+        && a.bytes()
+            .zip(b.bytes())
+            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+            == 0
 }
 
 fn own_exe() -> Option<PathBuf> {
@@ -412,40 +599,128 @@ mod tests {
     }
 
     #[test]
-    fn a_window_takes_paths_over_the_socket() {
+    fn hmac_matches_rfc_4231() {
+        // Test case 2.
+        let mac = hmac(b"Jefe", b"what do ya want for nothing?");
+        let hex: String = mac.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+        assert!(same("abc", "abc"));
+        assert!(!same("abc", "abd"));
+        assert!(!same("abc", "abcd"));
+    }
+
+    /// A window with secret "secret", and what it was handed.
+    fn window() -> (u16, Arc<Mutex<Option<PathBuf>>>, Receiver<Handoff>) {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         let root = Arc::new(Mutex::new(None));
         let (tx, rx) = mpsc::channel();
-        let shared = root.clone();
-        std::thread::spawn(move || listen(listener, "secret", &shared, &tx, &|| {}));
+        let shared = Shared {
+            token: "secret".to_owned(),
+            root: root.clone(),
+            tx: Mutex::new(tx),
+            wake: Box::new(|| {}),
+        };
+        std::thread::spawn(move || listen(listener, Arc::new(shared)));
+        (port, root, rx)
+    }
 
-        let entry = |token: &str| Entry {
+    fn entry(port: u16, token: &str) -> Entry {
+        Entry {
             protocol: PROTOCOL,
             pid: 0,
             port,
             token: token.to_owned(),
             exe: PathBuf::new(),
-        };
-        let target = Target::NewFile(std::env::temp_dir().join("x.txt"));
+        }
+    }
 
-        // The wrong token gets no answer.
-        assert_eq!(ask(&entry("guess"), Want::Any, &target), Some(false));
+    #[test]
+    fn a_window_takes_paths_over_the_socket() {
+        let (port, root, rx) = window();
+        let target = Target::NewFile(std::env::temp_dir().join("x.txt"));
+        let some = Some(&target);
+
+        // Without the secret, the window can't prove itself and is forgotten.
+        assert_eq!(ask(&entry(port, "guess"), Want::Any, some), Outcome::Gone);
         assert!(rx.try_recv().is_err());
 
         // An empty window takes it; one showing something else does not.
-        assert_eq!(ask(&entry("secret"), Want::Empty, &target), Some(true));
+        let good = entry(port, "secret");
+        assert_eq!(ask(&good, Want::Empty, some), Outcome::Accepted);
         assert_eq!(rx.recv().unwrap().target, target);
         *root.lock().unwrap() = Some(PathBuf::from("/somewhere/else"));
-        assert_eq!(ask(&entry("secret"), Want::Empty, &target), Some(false));
+        assert_eq!(ask(&good, Want::Empty, some), Outcome::Declined);
         assert!(rx.try_recv().is_err());
 
-        // Peeking gets the answer without the window doing anything.
+        // Peeking and pinging get answers without the window doing anything.
         *root.lock().unwrap() = Some(std::env::temp_dir());
-        assert_eq!(ask(&entry("secret"), Want::Peek, &target), Some(true));
+        assert_eq!(ask(&good, Want::Peek, some), Outcome::Accepted);
+        assert_eq!(ask(&good, Want::Ping, None), Outcome::Accepted);
         assert!(rx.try_recv().is_err());
-        assert_eq!(ask(&entry("secret"), Want::Showing, &target), Some(true));
+        assert_eq!(ask(&good, Want::Showing, some), Outcome::Accepted);
         assert_eq!(rx.recv().unwrap().target, target);
+    }
+
+    #[test]
+    fn the_path_is_never_sent_to_an_impostor() {
+        // Something else on a port a crashed window left behind.
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let heard = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut line = Line::new(stream, Instant::now() + EXCHANGE_DEADLINE);
+            let hello = line.read().unwrap();
+            let fake = Challenge {
+                nonce: "n".to_owned(),
+                proof: "0".repeat(64),
+            };
+            line.write(&serde_json::to_string(&fake).unwrap()).unwrap();
+            let mut rest = String::new();
+            while let Some(more) = line.read() {
+                rest.push_str(&more);
+            }
+            (hello, rest)
+        });
+        let target = Target::File(PathBuf::from("/private/plans.txt"));
+        assert_eq!(
+            ask(&entry(port, "secret"), Want::Any, Some(&target)),
+            Outcome::Gone
+        );
+        let (hello, rest) = heard.join().unwrap();
+        assert!(!hello.contains("plans") && !hello.contains("secret"));
+        assert!(rest.is_empty(), "sent after a bad proof: {rest}");
+    }
+
+    #[test]
+    fn a_stalled_connection_holds_up_nobody() {
+        let (port, _root, _rx) = window();
+        // Connects and says nothing.
+        let _stalled = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+        let started = Instant::now();
+        assert_eq!(
+            ask(&entry(port, "secret"), Want::Ping, None),
+            Outcome::Accepted
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_window_that_is_too_busy_is_kept() {
+        // Accepts, then hangs up without a word, as a window at its limit does.
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            drop(stream);
+        });
+        assert_eq!(
+            ask(&entry(port, "secret"), Want::Ping, None),
+            Outcome::Declined
+        );
     }
 
     #[test]
@@ -456,14 +731,10 @@ mod tests {
             .local_addr()
             .unwrap()
             .port();
-        let entry = Entry {
-            protocol: PROTOCOL,
-            pid: 0,
-            port,
-            token: String::new(),
-            exe: PathBuf::new(),
-        };
         let target = Target::Folder(std::env::temp_dir());
-        assert_eq!(ask(&entry, Want::Any, &target), None);
+        assert_eq!(
+            ask(&entry(port, ""), Want::Any, Some(&target)),
+            Outcome::Gone
+        );
     }
 }

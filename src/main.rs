@@ -38,15 +38,21 @@ fn main() -> eframe::Result {
         Err(e) => fail(&format!("{e}\nRun 'feather --help' to see the options."), 2),
     };
 
+    let from_shell = options.from_shell || cli::from_terminal();
+    let mut error = None;
     let initial = match &options.path {
         None => None,
         Some(path) => {
             let cwd = std::env::current_dir().unwrap_or_default();
             match cli::resolve(&cwd, path) {
                 Ok(target) => Some(target),
-                // Started from a shortcut there's nowhere to say so: open anyway.
-                Err(_) if !cli::from_terminal() => None,
-                Err(e) => fail(&e, 1),
+                Err(e) if from_shell => fail(&e, 1),
+                // Started from a shortcut there's no terminal to say so in:
+                // the window says it instead.
+                Err(e) => {
+                    error = Some(format!("Can't open {e}"));
+                    None
+                }
             }
         }
     };
@@ -59,7 +65,7 @@ fn main() -> eframe::Result {
         }
         // From a terminal, run the window in the background and give the
         // prompt back (debug builds stay put, to keep their logs in view).
-        if cfg!(not(debug_assertions)) && cli::from_terminal() {
+        if cfg!(not(debug_assertions)) && from_shell {
             let mut args: Vec<OsString> = vec!["--wait".into()];
             if options.window == WindowChoice::New {
                 args.push("--new-window".into());
@@ -77,8 +83,11 @@ fn main() -> eframe::Result {
         }
     }
     run(app::Startup {
-        new_window: options.window == WindowChoice::New,
+        // A path that couldn't be opened shouldn't turn into the last
+        // repository either: open empty, with the reason showing.
+        new_window: options.window == WindowChoice::New || error.is_some(),
         target: initial,
+        error,
     })
 }
 

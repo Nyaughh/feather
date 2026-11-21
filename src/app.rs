@@ -97,10 +97,9 @@ pub enum Cmd {
     LeaveSaving,
     LeaveDiscarding,
     LeaveCancelled,
-    /// A file or folder named on the command line, outside the open repository.
+    /// A file or folder named on the command line. Kept whole until it is
+    /// carried out, as the repository may change before then.
     OpenPath(Target),
-    /// Start a file that doesn't exist yet; saving creates it.
-    NewFile(String),
     /// Put the `feather` command on the PATH, or take it off.
     InstallCommand,
     RemoveCommand,
@@ -110,9 +109,7 @@ impl Cmd {
     /// Whether carrying this out would drop what is in the editor.
     fn leaves_file(&self, current: Option<&str>) -> bool {
         match self {
-            Self::OpenFile(rel) | Self::OpenAt { rel, .. } | Self::NewFile(rel) => {
-                current != Some(rel.as_str())
-            }
+            Self::OpenFile(rel) | Self::OpenAt { rel, .. } => current != Some(rel.as_str()),
             Self::OpenRepo(_)
             | Self::OpenPath(_)
             | Self::OpenDiff { .. }
@@ -478,6 +475,11 @@ impl Repo {
         matches!(&self.view, View::File(view) if view.is_dirty())
     }
 
+    /// The open file changed on disk while it had unsaved edits here.
+    fn changed_on_disk(&self) -> bool {
+        matches!(&self.view, View::File(FileView { edit: Some(buffer), .. }) if buffer.changed_on_disk)
+    }
+
     fn open_file(&mut self, rel: String) {
         if self.open_rel() == Some(rel.as_str()) {
             return;
@@ -625,21 +627,42 @@ impl Repo {
         let (Some(buffer), Some(file)) = (&mut view.edit, &mut view.file) else {
             return Ok(());
         };
-        // A new file is written even untouched, as saving it would be expected to.
-        let new = file.stamp.is_none() && !file.path.exists();
+        // Only a file that has never been on disk has no stamp (one that was
+        // read and has since gone shows an error, not an editor). It is
+        // written even untouched, as saving it would be expected to.
+        let new = file.stamp.is_none();
         if !buffer.dirty && !new {
             return Ok(());
         }
-        if new && let Some(dir) = file.path.parent() {
-            std::fs::create_dir_all(dir)
-                .map_err(|e| format!("Could not save {}: {e}", view.rel))?;
-        }
-        let result = if buffer.crlf {
-            std::fs::write(&file.path, buffer.text.replace('\n', "\r\n"))
+        let text = if buffer.crlf {
+            std::borrow::Cow::Owned(buffer.text.replace('\n', "\r\n"))
         } else {
-            std::fs::write(&file.path, &buffer.text)
+            std::borrow::Cow::Borrowed(buffer.text.as_str())
         };
-        result.map_err(|e| format!("Could not save {}: {e}", view.rel))?;
+        let result = if new {
+            create_new_file(&file.path, text.as_bytes())
+        } else {
+            std::fs::write(&file.path, text.as_bytes())
+        };
+        if let Err(e) = result {
+            if new && e.kind() == std::io::ErrorKind::AlreadyExists {
+                // Something else made the file since it was opened here. Keep
+                // the text, and treat it like any file changed on disk:
+                // saving again replaces it, reloading shows it.
+                buffer.changed_on_disk = true;
+                file.stamp = document::file_stamp(&file.path);
+                self.worker.watch(Watch::File {
+                    rel: view.rel.clone(),
+                    stamp: file.stamp,
+                });
+                return Err(format!(
+                    "{} was just created by another program, so it wasn't saved. Your text \
+                     is still here: save again to replace that file, or reload to open it.",
+                    view.rel
+                ));
+            }
+            return Err(format!("Could not save {}: {e}", view.rel));
+        }
 
         buffer.dirty = false;
         buffer.changed_on_disk = false;
@@ -921,6 +944,8 @@ pub struct Startup {
     /// Asked for as a new, empty window (`feather --new-window` with no path),
     /// so the last repository isn't reopened.
     pub new_window: bool,
+    /// Why the path on the command line couldn't be opened, to show.
+    pub error: Option<String>,
 }
 
 pub struct App {
@@ -981,6 +1006,9 @@ impl App {
             was_focused: true,
             closing: false,
         };
+        if let Some(error) = startup.error {
+            app.toast = Some(Toast::error(error, 0.0));
+        }
         // A path on the command line wins; otherwise reopen the last
         // repository, unless this was asked for as a new, empty window.
         match startup.target {
@@ -1020,7 +1048,16 @@ impl App {
     fn open_target(&mut self, target: Target, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
         let path = match target {
-            Target::Folder(path) => return self.run(Cmd::OpenRepo(path), ctx),
+            Target::Folder(path) => {
+                // Already showing it: being brought to the front is enough.
+                let shown = self.repo.as_ref().is_some_and(|repo| {
+                    crate::instance::shows(&repo.root, &Target::Folder(path.clone()))
+                });
+                if !shown {
+                    self.run(Cmd::OpenRepo(path), ctx);
+                }
+                return;
+            }
             Target::File(path) | Target::NewFile(path) => path,
         };
         let inside = |repo: &Repo| cli::relative_to(&repo.root, &path).filter(|r| !r.is_empty());
@@ -1035,7 +1072,11 @@ impl App {
             }
         }
         let Some(repo) = &mut self.repo else { return };
-        let Some(rel) = inside(repo) else { return };
+        let Some(rel) = inside(repo) else {
+            let text = format!("Can't open {}", path.display());
+            self.toast = Some(Toast::error(text, now));
+            return;
+        };
         if path.exists() {
             repo.open_file(rel);
         } else {
@@ -1043,20 +1084,18 @@ impl App {
         }
     }
 
-    /// What to do with a path another `feather` command handed over. `None`
-    /// when this window already shows it.
-    fn plan_handoff(&self, target: Target) -> Option<Cmd> {
+    /// Whether opening `target` would replace what the editor shows.
+    fn target_leaves_file(&self, target: &Target) -> bool {
         let Some(repo) = &self.repo else {
-            return Some(Cmd::OpenPath(target));
+            return false;
         };
-        if crate::instance::shows(&repo.root, &target) {
-            return match target {
-                Target::Folder(_) => None,
-                Target::File(path) => cli::relative_to(&repo.root, &path).map(Cmd::OpenFile),
-                Target::NewFile(path) => cli::relative_to(&repo.root, &path).map(Cmd::NewFile),
-            };
+        match target {
+            Target::Folder(_) => !crate::instance::shows(&repo.root, target),
+            Target::File(path) | Target::NewFile(path) => {
+                let rel = cli::relative_to(&repo.root, path).filter(|r| !r.is_empty());
+                rel.is_none() || rel.as_deref() != repo.open_rel()
+            }
         }
-        Some(Cmd::OpenPath(target))
     }
 
     fn start_command_job(&mut self, job: fn() -> Result<String, String>, ctx: &egui::Context) {
@@ -1112,9 +1151,7 @@ impl App {
             // Come to the front, as if the user had switched to this window.
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-            if let Some(cmd) = self.plan_handoff(handoff.target) {
-                cmds.push(cmd);
-            }
+            cmds.push(Cmd::OpenPath(handoff.target));
         }
 
         if let Some(rx) = &self.command_job {
@@ -1298,11 +1335,20 @@ impl App {
     /// lose them.
     fn apply(&mut self, cmd: Cmd, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
-        if let Some(repo) = &mut self.repo
+        let leaves = match &cmd {
+            Cmd::OpenPath(target) => self.target_leaves_file(target),
+            _ => self
+                .repo
+                .as_ref()
+                .is_some_and(|repo| cmd.leaves_file(repo.open_rel())),
+        };
+        if leaves
+            && let Some(repo) = &mut self.repo
             && repo.is_dirty()
-            && cmd.leaves_file(repo.open_rel())
         {
-            if !self.settings.auto_save {
+            // Auto save never writes over a file something else changed (or
+            // created) on disk: that takes an explicit choice.
+            if !self.settings.auto_save || repo.changed_on_disk() {
                 self.confirm_leave = Some(cmd);
                 return;
             }
@@ -1370,7 +1416,6 @@ impl App {
             }
             (Cmd::RemoveCommand, _) => self.start_command_job(crate::shell_command::remove, ctx),
             (Cmd::OpenFile(rel), Some(repo)) => repo.open_file(rel),
-            (Cmd::NewFile(rel), Some(repo)) => repo.open_new_file(rel),
             (Cmd::OpenAt { rel, jump }, Some(repo)) => repo.open_at(rel, jump),
             (Cmd::FocusSearch, Some(repo)) => {
                 repo.tab = Tab::Search;
@@ -1526,5 +1571,39 @@ impl eframe::App for App {
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         theme::bg_shell().to_normalized_gamma_f32()
+    }
+}
+
+/// Writes a file that must not exist yet, making its folders first. Fails
+/// with `AlreadyExists`, touching nothing, if something is there.
+fn create_new_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?
+        .write_all(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_new_file_never_replaces_one_that_appeared() {
+        let dir = std::env::temp_dir().join(format!("feather-new-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("deep").join("notes.md");
+
+        create_new_file(&path, b"mine").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"mine");
+
+        let again = create_new_file(&path, b"other").unwrap_err();
+        assert_eq!(again.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&path).unwrap(), b"mine");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

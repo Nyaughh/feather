@@ -4,6 +4,10 @@
 //! On macOS and Linux it is a symlink to this program. The Windows installer
 //! adds the command itself (see `packaging/windows`), so there is nothing to
 //! do from here.
+//!
+//! Nothing that belongs to something else is ever replaced or removed: only
+//! a missing entry, or a broken link left by an older Feather, is written
+//! over, and removing deletes the link only while it still points here.
 
 use std::path::{Path, PathBuf};
 
@@ -15,6 +19,8 @@ pub enum Status {
     /// Something else called `feather` is already there.
     Taken(PathBuf),
     Missing,
+    /// A broken link to a Feather that has moved or gone, holding this target.
+    Stale(PathBuf),
 }
 
 /// Where the symlink goes.
@@ -38,39 +44,55 @@ pub fn status() -> Status {
     let Some(link) = link_path() else {
         return Status::Installer;
     };
-    match std::fs::symlink_metadata(&link) {
-        Err(_) => Status::Missing,
-        Ok(meta) if meta.file_type().is_symlink() => {
-            let target = std::fs::canonicalize(&link).ok();
-            if target.is_some() && target == this_program().ok() {
-                Status::Installed
-            } else {
-                // A leftover link, say from a copy that has moved: ours to replace.
-                Status::Missing
-            }
-        }
-        Ok(_) => Status::Taken(link),
+    let Ok(program) = this_program() else {
+        return Status::Taken(link);
+    };
+    status_of(&link, &program)
+}
+
+/// What is at `link`, for a Feather whose program is `program`.
+fn status_of(link: &Path, program: &Path) -> Status {
+    let Ok(meta) = std::fs::symlink_metadata(link) else {
+        return Status::Missing;
+    };
+    if !meta.file_type().is_symlink() {
+        return Status::Taken(link.to_owned());
+    }
+    let Ok(target) = std::fs::read_link(link) else {
+        return Status::Taken(link.to_owned());
+    };
+    match std::fs::canonicalize(link) {
+        Ok(real) if real == program => Status::Installed,
+        // It leads somewhere real: someone else's command.
+        Ok(_) => Status::Taken(link.to_owned()),
+        // Broken. Only a link to something called feather is ours to fix.
+        Err(_) if target.file_name().is_some_and(|n| n == "feather") => Status::Stale(target),
+        Err(_) => Status::Taken(link.to_owned()),
     }
 }
 
-/// Creates (or repoints) the symlink. Returns a line to show the user.
+/// Creates the symlink. Returns a line to show the user.
 pub fn install() -> Result<String, String> {
     let link = link_path().ok_or("The installer adds the feather command on Windows.")?;
-    if let Status::Taken(path) = status() {
-        return Err(format!(
-            "{} already exists and isn't Feather's.",
-            path.display()
-        ));
-    }
     let exe = this_program()?;
-    let text = exe.to_string_lossy();
-    if text.contains("/AppTranslocation/") {
+    let stale = match status_of(&link, &exe) {
+        Status::Installed => return Ok("The feather command is already installed.".to_owned()),
+        Status::Taken(path) => {
+            return Err(format!(
+                "{} already exists and isn't Feather's.",
+                path.display()
+            ));
+        }
+        Status::Stale(old) => Some(old),
+        Status::Missing | Status::Installer => None,
+    };
+    if exe.to_string_lossy().contains("/AppTranslocation/") {
         return Err("Move Feather into Applications first, then try again.".to_owned());
     }
-    match link_here(&exe, &link) {
+    match link_here(&exe, &link, stale.as_deref()) {
         Ok(()) => {}
         Err(e) if cfg!(target_os = "macos") && e.kind() == std::io::ErrorKind::PermissionDenied => {
-            link_as_admin(&exe, &link)?;
+            link_as_admin(&exe, &link, stale.as_deref())?;
         }
         Err(e) => return Err(format!("Could not create {}: {e}", link.display())),
     }
@@ -91,23 +113,42 @@ pub fn remove() -> Result<String, String> {
     if status() != Status::Installed {
         return Ok("The feather command isn't installed.".to_owned());
     }
-    match std::fs::remove_file(&link) {
+    let target =
+        std::fs::read_link(&link).map_err(|e| format!("Could not read {}: {e}", link.display()))?;
+    match remove_if_unchanged(&link, &target) {
         Ok(()) => {}
         Err(e) if cfg!(target_os = "macos") && e.kind() == std::io::ErrorKind::PermissionDenied => {
-            run_as_admin("rm -f {1}", &[&link])?;
+            // Only while it still points where it did a moment ago.
+            run_as_admin(
+                "if [ \"$(readlink {1})\" = {2} ]; then rm -f {1}; fi",
+                &[&link, &target],
+            )?;
         }
         Err(e) => return Err(format!("Could not remove {}: {e}", link.display())),
     }
     Ok("Removed the feather command.".to_owned())
 }
 
-fn link_here(exe: &Path, link: &Path) -> std::io::Result<()> {
+/// Deletes `link` if it is still a symlink to `target`.
+fn remove_if_unchanged(link: &Path, target: &Path) -> std::io::Result<()> {
+    if std::fs::read_link(link).is_ok_and(|now| now == target) {
+        std::fs::remove_file(link)
+    } else {
+        Err(std::io::Error::other("it changed meanwhile"))
+    }
+}
+
+/// Makes the link, first clearing a broken one that still points at `stale`.
+fn link_here(exe: &Path, link: &Path, stale: Option<&Path>) -> std::io::Result<()> {
     if let Some(dir) = link.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    if std::fs::symlink_metadata(link).is_ok() {
-        std::fs::remove_file(link)?;
+    if let Some(old) = stale
+        && !link.exists()
+    {
+        remove_if_unchanged(link, old)?;
     }
+    // Fails rather than replaces if anything is there now.
     #[cfg(unix)]
     return std::os::unix::fs::symlink(exe, link);
     #[cfg(not(unix))]
@@ -119,29 +160,28 @@ fn link_here(exe: &Path, link: &Path) -> std::io::Result<()> {
 
 /// /usr/local/bin belongs to root on most Macs: ask for a password the way
 /// VS Code does.
-fn link_as_admin(exe: &Path, link: &Path) -> Result<(), String> {
+fn link_as_admin(exe: &Path, link: &Path, stale: Option<&Path>) -> Result<(), String> {
     let dir = link.parent().unwrap_or(Path::new("/usr/local/bin"));
-    run_as_admin("mkdir -p {1} && ln -sf {2} {3}", &[dir, exe, link])
+    match stale {
+        // `ln -s` without -f: it won't replace anything that is there.
+        None => run_as_admin("mkdir -p {1} && ln -s {2} {3}", &[dir, exe, link]),
+        Some(old) => run_as_admin(
+            "mkdir -p {1} && if [ -L {3} ] && [ ! -e {3} ] && [ \"$(readlink {3})\" = {4} ]; \
+             then rm -f {3}; fi && ln -s {2} {3}",
+            &[dir, exe, link, old],
+        ),
+    }
 }
 
 /// Runs a shell command through an administrator password prompt. `{1}`,
 /// `{2}` and so on stand for the paths, which reach the script as arguments,
-/// so nothing needs escaping.
+/// so the paths need no escaping.
 fn run_as_admin(command: &str, paths: &[&Path]) -> Result<(), String> {
-    let mut script = command.to_owned();
-    for i in 1..=paths.len() {
-        script = script.replace(
-            &format!("{{{i}}}"),
-            &format!("\" & quoted form of item {i} of argv & \""),
-        );
-    }
     let output = std::process::Command::new("osascript")
         .arg("-e")
         .arg("on run argv")
         .arg("-e")
-        .arg(format!(
-            "do shell script \"{script}\" with administrator privileges"
-        ))
+        .arg(admin_script(command, paths.len()))
         .arg("-e")
         .arg("end run")
         .args(paths)
@@ -157,6 +197,20 @@ fn run_as_admin(command: &str, paths: &[&Path]) -> Result<(), String> {
             Err(format!("Could not install the command: {}", error.trim()))
         }
     }
+}
+
+/// The AppleScript line that runs `command`, with `{n}` replaced by the
+/// shell-quoted nth argument.
+fn admin_script(command: &str, count: usize) -> String {
+    // The command sits inside an AppleScript string: escape it for that first.
+    let mut script = command.replace('\\', "\\\\").replace('"', "\\\"");
+    for i in 1..=count {
+        script = script.replace(
+            &format!("{{{i}}}"),
+            &format!("\" & quoted form of item {i} of argv & \""),
+        );
+    }
+    format!("do shell script \"{script}\" with administrator privileges")
 }
 
 fn on_path(dir: &Path) -> bool {
@@ -176,5 +230,59 @@ mod tests {
         } else {
             assert!(link.is_some_and(|l| l.ends_with("bin/feather")));
         }
+    }
+
+    #[test]
+    fn admin_scripts_quote_for_applescript() {
+        assert_eq!(
+            admin_script("if [ \"$(readlink {1})\" = {2} ]; then rm -f {1}; fi", 2),
+            "do shell script \"if [ \\\"$(readlink \" & quoted form of item 1 of argv & \")\\\" = \
+             \" & quoted form of item 2 of argv & \" ]; then rm -f \" & quoted form of item 1 of \
+             argv & \"; fi\" with administrator privileges"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_feathers_own_links_are_touched() {
+        use std::os::unix::fs::symlink;
+        let dir = std::env::temp_dir().join(format!("feather-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let program = dir.join("feather");
+        let other = dir.join("other-tool");
+        std::fs::write(&program, "").unwrap();
+        std::fs::write(&other, "").unwrap();
+        let link = dir.join("bin").join("feather");
+
+        assert_eq!(status_of(&link, &program), Status::Missing);
+        symlink(&program, &link).unwrap();
+        assert_eq!(status_of(&link, &program), Status::Installed);
+
+        // A working link to anything else is someone else's.
+        std::fs::remove_file(&link).unwrap();
+        symlink(&other, &link).unwrap();
+        assert_eq!(status_of(&link, &program), Status::Taken(link.clone()));
+        assert!(link_here(&program, &link, None).is_err());
+        assert_eq!(std::fs::read_link(&link).unwrap(), other);
+
+        // A broken link to some feather is a leftover, and can be replaced.
+        std::fs::remove_file(&link).unwrap();
+        let gone = dir.join("old").join("feather");
+        symlink(&gone, &link).unwrap();
+        assert_eq!(status_of(&link, &program), Status::Stale(gone.clone()));
+        link_here(&program, &link, Some(&gone)).unwrap();
+        assert_eq!(status_of(&link, &program), Status::Installed);
+
+        // A broken link to anything else is left alone, as is a plain file.
+        std::fs::remove_file(&link).unwrap();
+        symlink(dir.join("old").join("tool"), &link).unwrap();
+        assert_eq!(status_of(&link, &program), Status::Taken(link.clone()));
+        std::fs::remove_file(&link).unwrap();
+        std::fs::write(&link, "").unwrap();
+        assert_eq!(status_of(&link, &program), Status::Taken(link.clone()));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -81,9 +81,14 @@ Filename: "{app}\feather.exe"; Description: "{cm:LaunchProgram,Feather}"; Flags:
 // Adds {app}\bin to the user's PATH when the "addtopath" task is chosen, and
 // takes it off again on uninstall. Only the user's own PATH is touched (no
 // administrator rights needed), and every other entry is left as it was.
+// Uninstalling removes the entry only if an install of Feather added it,
+// which is remembered under FeatherKey, so a PATH entry the user made
+// themselves stays.
 
 const
   EnvironmentKey = 'Environment';
+  FeatherKey = 'Software\Feather';
+  AddedValue = 'AddedBinToPath';
 
 function BinDir: String;
 begin
@@ -103,11 +108,21 @@ var
 begin
   if not RegQueryStringValue(HKCU, EnvironmentKey, 'Path', Path) then
     Path := '';
+  // Already there, from an earlier install or by hand: leave the record of
+  // who added it as it is.
   if FindEntry(Path, BinDir) > 0 then
     exit;
   if (Path <> '') and (Copy(Path, Length(Path), 1) <> ';') then
     Path := Path + ';';
-  RegWriteExpandStringValue(HKCU, EnvironmentKey, 'Path', Path + BinDir);
+  if RegWriteExpandStringValue(HKCU, EnvironmentKey, 'Path', Path + BinDir) then
+    RegWriteDWordValue(HKCU, FeatherKey, AddedValue, 1);
+end;
+
+function AddedByInstaller: Boolean;
+var
+  Added: Cardinal;
+begin
+  Result := RegQueryDWordValue(HKCU, FeatherKey, AddedValue, Added) and (Added = 1);
 end;
 
 procedure RemoveFromPath;
@@ -115,6 +130,10 @@ var
   Path: String;
   At: Integer;
 begin
+  if not AddedByInstaller then
+    exit;
+  RegDeleteValue(HKCU, FeatherKey, AddedValue);
+  RegDeleteKeyIfEmpty(HKCU, FeatherKey);
   if not RegQueryStringValue(HKCU, EnvironmentKey, 'Path', Path) then
     exit;
   At := FindEntry(Path, BinDir);

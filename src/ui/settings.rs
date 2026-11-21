@@ -294,7 +294,7 @@ fn command_line(ui: &mut Ui, cmds: &mut Vec<Cmd>) {
             ),
             Some(("Remove", Cmd::RemoveCommand)),
         ),
-        Status::Missing => (
+        Status::Missing | Status::Stale(_) => (
             format!(
                 "Open files and folders from a terminal with feather . or feather main.rs. \
                  Installing links {} to Feather.",

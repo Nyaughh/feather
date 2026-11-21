@@ -38,6 +38,9 @@ pub struct Options {
     pub window: WindowChoice,
     /// Run the window in this process rather than in the background.
     pub wait: bool,
+    /// Run as the `feather` shell command (the Windows wrappers say so with
+    /// a hidden `--from-shell`), even with no terminal in sight.
+    pub from_shell: bool,
 }
 
 /// Which window a path should open in.
@@ -74,6 +77,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
                 "-n" | "--new-window" => options.window = WindowChoice::New,
                 "-r" | "--reuse-window" => options.window = WindowChoice::Reuse,
                 "-w" | "--wait" => options.wait = true,
+                "--from-shell" => options.from_shell = true,
                 // Older macOS adds a process serial number when Finder starts an app.
                 t if t.starts_with("-psn_") => {}
                 t => return Err(format!("unknown option '{t}'")),
@@ -98,6 +102,13 @@ pub fn resolve(cwd: &Path, arg: &OsStr) -> Result<Target, String> {
     }
     let path = cwd.join(arg);
     let shown = Path::new(arg).display();
+    // The editor keeps paths as text: one that isn't valid Unicode would open
+    // or save under a different name.
+    if path.to_str().is_none() {
+        return Err(format!(
+            "{shown}: Feather can only open paths whose names are valid Unicode"
+        ));
+    }
     let names_folder = ends_with_separator(arg);
     if let Ok(meta) = std::fs::metadata(&path) {
         let real = canonical(&path);
@@ -105,8 +116,11 @@ pub fn resolve(cwd: &Path, arg: &OsStr) -> Result<Target, String> {
             Ok(Target::Folder(real))
         } else if names_folder {
             Err(format!("{shown} is a file, not a folder"))
-        } else {
+        } else if meta.is_file() {
             Ok(Target::File(real))
+        } else {
+            // A pipe or a device would hang or never end.
+            Err(format!("{shown} isn't a regular file or folder"))
         };
     }
     if names_folder {
@@ -131,36 +145,65 @@ pub fn existing_ancestor(path: &Path) -> Option<PathBuf> {
 }
 
 /// `path` relative to `root` with `/` between names, if it is inside it
-/// (an empty string when it is `root` itself). On Windows the comparison
-/// ignores case and accepts either kind of slash, since git reports
-/// `C:/repo` where Windows says `C:\repo`.
+/// (an empty string when it is `root` itself). `None` as well when a name
+/// isn't valid Unicode. On Windows the comparison ignores case and either
+/// kind of slash, since git reports `C:/repo` and `//server/share/repo`
+/// where Windows says `C:\repo` and `\\server\share\repo`.
 pub fn relative_to(root: &Path, path: &Path) -> Option<String> {
+    let (root, path) = (backslashed(root), backslashed(path));
     let key = |c: Component| {
-        let text = c.as_os_str().to_string_lossy().into_owned();
-        if cfg!(windows) {
+        let text = c.as_os_str().to_str()?;
+        Some(if cfg!(windows) {
             text.to_lowercase()
         } else {
-            text
-        }
+            text.to_owned()
+        })
     };
     let mut inner = path.components();
     for part in root.components() {
-        if key(part) != key(inner.next()?) {
+        if key(part)? != key(inner.next()?)? {
             return None;
         }
     }
-    let names: Vec<String> = inner
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect();
-    Some(names.join("/"))
+    let names: Option<Vec<&str>> = inner.map(|c| c.as_os_str().to_str()).collect();
+    Some(names?.join("/"))
 }
 
-/// `canonicalize` on Windows yields `\\?\C:\…` paths, which git and people
-/// both dislike. Strip the prefix when the rest is an ordinary drive path.
+/// On Windows, `path` with every `/` made a `\`, so prefixes such as
+/// `//server/share` read the same as `\\server\share`.
+fn backslashed(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .map(|c| {
+                if c == u16::from(b'/') {
+                    u16::from(b'\\')
+                } else {
+                    c
+                }
+            })
+            .collect();
+        PathBuf::from(OsString::from_wide(&wide))
+    }
+    #[cfg(not(windows))]
+    path.to_owned()
+}
+
+/// `canonicalize` on Windows yields `\\?\C:\…` and `\\?\UNC\server\share\…`
+/// paths, which git and people both dislike. Turn them into `C:\…` and
+/// `\\server\share\…`; anything else stays as it is.
 pub fn strip_verbatim(path: PathBuf) -> PathBuf {
     #[cfg(windows)]
     {
-        let text = path.to_string_lossy();
+        let Some(text) = path.to_str() else {
+            return path;
+        };
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
         if let Some(rest) = text.strip_prefix(r"\\?\")
             && rest.as_bytes().get(1) == Some(&b':')
         {
@@ -201,12 +244,15 @@ fn ends_with_separator(arg: &OsStr) -> bool {
 // ── Launching ──────────────────────────────────────────────────────────────
 
 /// Whether a terminal (or a script) ran us, as opposed to a desktop shortcut
-/// or the file manager.
+/// or the file manager. The installed commands say so outright (the
+/// `--from-shell` of the Windows wrappers, and the symlink on macOS and
+/// Linux), so a script with every stream redirected counts too.
 pub fn from_terminal() -> bool {
     #[cfg(unix)]
     {
         use std::io::IsTerminal;
-        std::io::stdin().is_terminal()
+        invoked_through_link()
+            || std::io::stdin().is_terminal()
             || std::io::stdout().is_terminal()
             || std::io::stderr().is_terminal()
     }
@@ -214,6 +260,28 @@ pub fn from_terminal() -> bool {
     {
         windows::has_std_handles() || windows::attach_parent_console()
     }
+}
+
+/// Whether we were started through a symlink, such as the `feather` command
+/// Settings installs. App bundles and desktop files run the program itself.
+#[cfg(unix)]
+fn invoked_through_link() -> bool {
+    let Some(name) = std::env::args_os().next().map(PathBuf::from) else {
+        return false;
+    };
+    let found = if name.components().count() > 1 {
+        Some(name)
+    } else {
+        // A bare name came from a PATH search.
+        std::env::var_os("PATH").and_then(|path| {
+            std::env::split_paths(&path)
+                .map(|dir| dir.join(&name))
+                .find(|candidate| candidate.is_file())
+        })
+    };
+    found.is_some_and(|path| {
+        std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+    })
 }
 
 /// Starts another copy of Feather that outlives this one and doesn't hold on
@@ -540,6 +608,37 @@ mod tests {
     }
 
     #[test]
+    fn the_shell_wrappers_say_where_they_come_from() {
+        let o = open(&["--from-shell", "--", "x"]);
+        assert!(o.from_shell);
+        assert_eq!(o.path.as_deref(), Some(OsStr::new("x")));
+        assert!(!open(&["x"]).from_shell);
+    }
+
+    #[test]
+    fn unsupported_paths_are_refused() {
+        let cwd = std::env::temp_dir();
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            // A device would be read forever.
+            assert!(
+                resolve(&cwd, OsStr::new("/dev/null"))
+                    .unwrap_err()
+                    .contains("regular")
+            );
+            let bad = OsStr::from_bytes(b"caf\xe9.txt");
+            assert!(resolve(&cwd, bad).unwrap_err().contains("Unicode"));
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            let bad = OsString::from_wide(&[u16::from(b'a'), 0xD800]);
+            assert!(resolve(&cwd, &bad).unwrap_err().contains("Unicode"));
+        }
+    }
+
+    #[test]
     fn finder_serial_number_is_ignored() {
         assert_eq!(open(&["-psn_0_12345"]), Options::default());
     }
@@ -666,6 +765,30 @@ mod tests {
         assert_eq!(
             strip_verbatim(PathBuf::from(r"\\?\C:\a\b")),
             PathBuf::from(r"C:\a\b")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_network_shares_match_too() {
+        assert_eq!(
+            strip_verbatim(PathBuf::from(r"\\?\UNC\server\share\repo")),
+            PathBuf::from(r"\\server\share\repo")
+        );
+        // Other verbatim forms are left as they are.
+        assert_eq!(
+            strip_verbatim(PathBuf::from(r"\\?\Volume{1234}\x")),
+            PathBuf::from(r"\\?\Volume{1234}\x")
+        );
+        // git's spelling of a share against Windows'.
+        let root = Path::new("//Server/Share/repo");
+        assert_eq!(
+            relative_to(root, Path::new(r"\\server\share\Repo\src\a.rs")).as_deref(),
+            Some("src/a.rs")
+        );
+        assert_eq!(
+            relative_to(root, Path::new(r"\\server\other\repo\a.rs")),
+            None
         );
     }
 }
