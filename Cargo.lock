@@ -932,6 +932,7 @@ dependencies = [
  "portable-pty",
  "resvg",
  "rfd",
+ "ron",
  "self-replace",
  "serde",
  "serde_json",

@@ -16,14 +16,13 @@ use crate::git::{
     Stash, Status, Worktree,
 };
 use crate::settings::{Settings, TerminalDock};
-use crate::store::{self, Store};
+use crate::store::{self, RecentOp, Store};
 use crate::terminal::Terminals;
 use crate::tree::Tree;
 use crate::update::{self, Updater};
 use crate::worker::{Action, CommitDetail, Event, Watch, Worker};
 use crate::{theme, ui};
 
-const SETTINGS_KEY: &str = "feather";
 const TOAST_SECONDS: f64 = 7.0;
 /// With auto save on, edits are written this long after typing stops.
 const AUTO_SAVE_SECONDS: f64 = 1.0;
@@ -992,14 +991,8 @@ pub struct App {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, startup: Startup) -> Self {
-        // Settings saved by versions before the shared file came in. Only
-        // the window that owns eframe's state reads them: the others don't
-        // see that file.
-        let older: Option<Settings> = cc
-            .storage
-            .filter(|_| startup.owns_window_state)
-            .and_then(|s| eframe::get_value(s, SETTINGS_KEY));
-        let (store, settings) = Store::open(store::default_path(), older);
+        // Also moves over settings saved by versions before the shared file.
+        let (store, settings) = Store::open_default();
 
         theme::install_fonts(&cc.egui_ctx);
         theme::apply(&cc.egui_ctx, &settings);
@@ -1057,7 +1050,8 @@ impl App {
         let mut repo = repo;
         repo.github = repo.is_git.then(|| git::github_slug(&repo.root)).flatten();
         self.images.set_repository(&repo.root, repo.github.clone());
-        store::touch_recent(&mut self.settings.recent, &repo.root);
+        self.store
+            .recent(&mut self.settings, RecentOp::Open(repo.root.clone()));
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
             "{} - Feather",
             repo.name
@@ -1172,7 +1166,8 @@ impl App {
     fn close_folder(&mut self, ctx: &egui::Context) {
         if let Some(repo) = self.repo.take() {
             // Keeps it first in the list, ready to reopen.
-            store::touch_recent(&mut self.settings.recent, &repo.root);
+            self.store
+                .recent(&mut self.settings, RecentOp::Open(repo.root));
         }
         // Now free to take a folder from a `feather` command.
         if let Some(instance) = &self.instance {
@@ -1455,12 +1450,13 @@ impl App {
                 }
             }
             (Cmd::CloseFolder, _) => self.close_folder(ctx),
-            (Cmd::ClearRecent, _) => self.settings.recent.clear(),
+            (Cmd::ClearRecent, _) => self.store.recent(&mut self.settings, RecentOp::Clear),
             (Cmd::OpenRepo(path), _) => {
                 if path.is_dir() {
                     self.open_repo(&path, ctx);
                 } else {
-                    self.settings.recent.retain(|p| *p != path);
+                    self.store
+                        .recent(&mut self.settings, RecentOp::Forget(path.clone()));
                     self.toast = Some(Toast::error(
                         format!("{} no longer exists", path.display()),
                         now,
@@ -1661,7 +1657,7 @@ impl eframe::App for App {
         self.store.flush(&mut self.settings);
         // Still kept here too, for going back to an older version.
         if self.owns_window_state {
-            eframe::set_value(storage, SETTINGS_KEY, &self.settings);
+            eframe::set_value(storage, store::LEGACY_KEY, &self.settings);
         }
     }
 
@@ -1672,7 +1668,8 @@ impl eframe::App for App {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // The folder in the window closed last is the one a plain launch reopens.
         if let Some(repo) = &self.repo {
-            store::touch_recent(&mut self.settings.recent, &repo.root);
+            self.store
+                .recent(&mut self.settings, RecentOp::Open(repo.root.clone()));
         }
         self.store.flush(&mut self.settings);
     }

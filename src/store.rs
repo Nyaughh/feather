@@ -4,11 +4,13 @@
 //! Each window is its own process with its own copy of the settings. When a
 //! window writes, it re-reads the file under a lock and changes only the
 //! settings it changed itself, so two windows never undo each other's changes.
-//! Settings it doesn't know (saved by a newer version) are left as they are.
-//! A window also picks up changes made by the others (a new theme, a folder
-//! another window opened) when it next looks at the file.
+//! Settings it doesn't know (saved by a newer version) are left as they are,
+//! and a file it can't read is left alone rather than replaced. A window also
+//! picks up changes made by the others (a new theme, a folder another window
+//! opened) when it next looks at the file.
 
 use serde_json::{Map, Value};
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
@@ -17,6 +19,10 @@ use std::sync::OnceLock;
 use crate::settings::{MAX_RECENT, Settings};
 
 const FILE_NAME: &str = "settings.json";
+/// eframe's own saved state, where versions before this file kept settings.
+const LEGACY_FILE_NAME: &str = "app.ron";
+/// The key the settings had in it.
+pub const LEGACY_KEY: &str = "feather";
 /// How long settings sit unwritten after they change, so dragging a slider
 /// doesn't write the file on every frame. Also the wait before trying again
 /// when a write fails.
@@ -29,61 +35,111 @@ const CHECK_EVERY: f64 = 1.0;
 /// new window starts the same way.
 const WINDOW_KEYS: [&str; 3] = ["sidebar_open", "history_open", "terminal_dock"];
 
+/// A change to the list of recent folders. Recorded as what was done rather
+/// than as the resulting list, so it can be replayed on top of changes other
+/// windows made meanwhile.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RecentOp {
+    /// A folder was opened: it goes to the top.
+    Open(PathBuf),
+    /// A folder was taken off the list.
+    Forget(PathBuf),
+    Clear,
+}
+
+impl RecentOp {
+    fn apply(&self, recent: &mut Vec<PathBuf>) {
+        match self {
+            Self::Open(path) => {
+                recent.retain(|p| p != path);
+                recent.insert(0, path.clone());
+                recent.truncate(MAX_RECENT);
+            }
+            Self::Forget(path) => recent.retain(|p| p != path),
+            Self::Clear => recent.clear(),
+        }
+    }
+}
+
 pub struct Store {
     /// `None` when there is nowhere to keep the file, which leaves settings
     /// for this run only.
     path: Option<PathBuf>,
+    /// Where an older version kept settings, to move them over from.
+    legacy: Option<PathBuf>,
     /// The settings as of the last successful read or write.
     base: Settings,
     /// The file's text as of then (`None`: there was no file), to notice
     /// when another window writes it.
     seen: Option<String>,
+    /// Changes to the recent folders since then.
+    recent_ops: Vec<RecentOp>,
     /// When the settings first differed from `base`.
     changed_at: Option<f64>,
     last_check: f64,
 }
 
-/// Where the settings file lives: beside eframe's own saved state.
-pub fn default_path() -> Option<PathBuf> {
-    eframe::storage_dir("feather").map(|dir| dir.join(FILE_NAME))
+/// What an older version saved.
+enum Legacy {
+    /// Nothing: a fresh install.
+    Nothing,
+    Found(Settings),
+    /// There is something, but it can't be read right now.
+    Unreadable,
 }
 
 impl Store {
-    /// Reads the settings file. Without one, `legacy` (what an older version
-    /// saved) is moved into a new file; with neither, the defaults are used
-    /// and nothing is written until something changes.
-    pub fn open(path: Option<PathBuf>, legacy: Option<Settings>) -> (Self, Settings) {
-        let mut fallback = legacy.clone().unwrap_or_default();
-        prepare(&mut fallback);
+    /// The settings file in its usual place, with the older place to move
+    /// settings over from.
+    pub fn open_default() -> (Self, Settings) {
+        let dir = eframe::storage_dir("feather");
+        Self::open(
+            dir.as_ref().map(|d| d.join(FILE_NAME)),
+            dir.as_ref().map(|d| d.join(LEGACY_FILE_NAME)),
+        )
+    }
+
+    /// Reads the settings file. Without one, the settings an older version
+    /// left in `legacy` are moved into a new file (by whichever window gets
+    /// there first); with neither, the defaults are used and nothing is
+    /// written until something changes.
+    pub fn open(path: Option<PathBuf>, legacy: Option<PathBuf>) -> (Self, Settings) {
         let mut store = Self {
             path: path.clone(),
-            base: fallback.clone(),
+            legacy,
+            base: defaults(),
             seen: None,
+            recent_ops: Vec::new(),
             changed_at: None,
             last_check: f64::NEG_INFINITY,
         };
         let Some(path) = path else {
-            return (store, fallback);
+            return (store, defaults());
         };
         // Read and, if need be, created under the lock, so a window starting
         // at the same moment sees either nothing or the whole migration.
         let lock = lock(&path);
         match read_text(&path) {
             Ok(Some(text)) => {
-                if let Some((_, settings)) = decode(&text, &fallback) {
+                if let Some((_, settings)) = decode(&text, &store.base) {
                     store.base = settings;
                 }
                 store.seen = Some(text);
             }
             Ok(None) => {
-                if let (Some(_), Some(_)) = (&legacy, &lock)
-                    && let Some(text) = encode(&to_map(&fallback).unwrap_or_default())
-                    && write_text(&path, &text).is_ok()
-                {
-                    store.seen = Some(text);
+                if let Legacy::Found(settings) = store.read_legacy() {
+                    // Without the lock this stays read-only; a later write
+                    // moves it over.
+                    if lock.is_some()
+                        && let Some(text) = to_map(&settings).as_ref().and_then(encode)
+                        && write_text(&path, &text).is_ok()
+                    {
+                        store.seen = Some(text);
+                    }
+                    store.base = settings;
                 }
             }
-            // Unreadable for now: start from the fallback, and take the file
+            // Unreadable for now: start from the defaults, and take the file
             // in once it can be read.
             Err(_) => {}
         }
@@ -92,11 +148,21 @@ impl Store {
         (store, settings)
     }
 
+    /// Records a change to the recent folders and makes it in `settings`.
+    pub fn recent(&mut self, settings: &mut Settings, op: RecentOp) {
+        op.apply(&mut settings.recent);
+        self.recent_ops.push(op);
+    }
+
+    fn has_changes(&self, settings: &Settings) -> bool {
+        *settings != self.base || !self.recent_ops.is_empty()
+    }
+
     /// Call once a frame. Writes changes once they have settled and picks up
     /// changes from other windows. Returns how long until it next needs a
     /// frame, if it is waiting to write.
     pub fn tick(&mut self, settings: &mut Settings, now: f64) -> Option<f64> {
-        if *settings != self.base {
+        if self.has_changes(settings) {
             let since = *self.changed_at.get_or_insert(now);
             let wait = since + WRITE_DELAY - now;
             if wait > 0.0 {
@@ -119,7 +185,7 @@ impl Store {
     /// Writes any changes now, for when the window is closing.
     pub fn flush(&mut self, settings: &mut Settings) {
         for attempt in 0..5 {
-            if *settings == self.base && !self.changed_on_disk() {
+            if !self.has_changes(settings) && !self.changed_on_disk() {
                 return;
             }
             if self.sync(settings) {
@@ -137,25 +203,63 @@ impl Store {
         read_text(path).is_ok_and(|text| text != self.seen)
     }
 
+    fn read_legacy(&self) -> Legacy {
+        let Some(path) = &self.legacy else {
+            return Legacy::Nothing;
+        };
+        match read_text(path) {
+            Ok(None) => Legacy::Nothing,
+            Ok(Some(text)) => match parse_legacy(&text) {
+                Some(Some(mut settings)) => {
+                    prepare(&mut settings);
+                    Legacy::Found(settings)
+                }
+                Some(None) => Legacy::Nothing,
+                None => Legacy::Unreadable,
+            },
+            Err(_) => Legacy::Unreadable,
+        }
+    }
+
     /// Merges this window's changes into the file and writes the result.
     /// On success `settings` holds the merged settings; on failure nothing
     /// is changed, so the same changes can be tried again.
     fn sync(&mut self, settings: &mut Settings) -> bool {
         let Some(path) = self.path.clone() else {
             self.base = settings.clone();
+            self.recent_ops.clear();
             self.changed_at = None;
             return true;
         };
         // Held from reading to replacing, so two windows saving at the same
-        // moment take turns.
+        // moment take turns. Without it, settings stay as they are on disk.
         let Some(_lock) = lock(&path) else {
             return false;
         };
-        let Ok(disk_text) = read_text(&path) else {
-            return false;
+        let disk = match read_text(&path) {
+            Ok(Some(text)) => match decode(&text, &self.base) {
+                Some(decoded) => Some((Some(text), decoded)),
+                // Present but not readable as settings: left for whoever
+                // can read it, not replaced.
+                None => return false,
+            },
+            Ok(None) => match self.read_legacy() {
+                // Not moved over yet: these changes go on top of it.
+                Legacy::Found(old) => match to_map(&old) {
+                    Some(map) => Some((None, (map, old))),
+                    None => return false,
+                },
+                Legacy::Nothing => None,
+                // Moving it over failed for now; a fresh file would lose it.
+                Legacy::Unreadable => return false,
+            },
+            Err(_) => return false,
         };
-        let decoded = disk_text.as_deref().and_then(|t| decode(t, &self.base));
-        let Some((text, merged)) = merge(&self.base, settings, decoded) else {
+        let (disk_text, decoded) = match disk {
+            Some((text, decoded)) => (text, Some(decoded)),
+            None => (None, None),
+        };
+        let Some((text, merged)) = merge(&self.base, settings, &self.recent_ops, decoded) else {
             return false;
         };
         if disk_text.as_ref() != Some(&text) && write_text(&path, &text).is_err() {
@@ -163,15 +267,32 @@ impl Store {
         }
         self.seen = Some(text);
         self.base = merged.clone();
+        self.recent_ops.clear();
         self.changed_at = None;
         *settings = merged;
         true
     }
 }
 
+fn defaults() -> Settings {
+    let mut settings = Settings::default();
+    prepare(&mut settings);
+    settings
+}
+
 fn prepare(settings: &mut Settings) {
     settings.migrate();
     settings.sanitize();
+}
+
+/// The settings in an older version's `app.ron`: `Some(None)` if it has
+/// none, `None` if it can't be read.
+fn parse_legacy(text: &str) -> Option<Option<Settings>> {
+    let values: HashMap<String, String> = ron::from_str(text).ok()?;
+    match values.get(LEGACY_KEY) {
+        Some(value) => ron::from_str(value).ok().map(Some),
+        None => Some(None),
+    }
 }
 
 /// The file's text, or `None` if there is no file.
@@ -196,7 +317,8 @@ fn write_text(path: &Path, text: &str) -> io::Result<()> {
 }
 
 /// Takes the lock that guards the settings file, waiting for it if another
-/// window has it. `None` if it can't be taken.
+/// window has it. `None` if it can't be taken, in which case nothing may be
+/// written.
 fn lock(path: &Path) -> Option<File> {
     if let Some(dir) = path.parent() {
         let _ = fs::create_dir_all(dir);
@@ -207,12 +329,8 @@ fn lock(path: &Path) -> Option<File> {
         .write(true)
         .open(path.with_extension("lock"))
         .ok()?;
-    match file.lock() {
-        Ok(()) => Some(file),
-        // Nothing to take turns with on such a system.
-        Err(e) if e.kind() == ErrorKind::Unsupported => Some(file),
-        Err(_) => None,
-    }
+    file.lock().ok()?;
+    Some(file)
 }
 
 fn encode(map: &Map<String, Value>) -> Option<String> {
@@ -256,13 +374,14 @@ fn to_map(settings: &Settings) -> Option<Map<String, Value>> {
     }
 }
 
-/// Combines the settings this window changed since `base` with the file's
-/// (`None` when there is no readable file). Returns the text to write and
-/// the settings this window should use: what was written, except that the
-/// window keeps its own [`WINDOW_KEYS`].
+/// Combines the settings this window changed since `base`, and its changes
+/// to the recent folders, with the file's (`None` when there is no file
+/// yet). Returns the text to write and the settings this window should use:
+/// what was written, except that the window keeps its own [`WINDOW_KEYS`].
 fn merge(
     base: &Settings,
     local: &Settings,
+    recent_ops: &[RecentOp],
     disk: Option<(Map<String, Value>, Settings)>,
 ) -> Option<(String, Settings)> {
     let base_map = to_map(base)?;
@@ -270,12 +389,15 @@ fn merge(
     // With no file to merge into, this window's settings are written whole.
     let (mut out, disk) = disk.unwrap_or_else(|| (base_map.clone(), base.clone()));
     for (key, value) in &local_map {
-        if base_map.get(key) != Some(value) && key != "recent" {
+        if base_map.get(key) != Some(value) {
             out.insert(key.clone(), value.clone());
         }
     }
-    if local.recent != base.recent {
-        let recent = merge_recent(&base.recent, &local.recent, &disk.recent);
+    if !recent_ops.is_empty() {
+        let mut recent = disk.recent;
+        for op in recent_ops {
+            op.apply(&mut recent);
+        }
         out.insert("recent".to_owned(), serde_json::to_value(recent).ok()?);
     }
     let text = encode(&out)?;
@@ -287,65 +409,19 @@ fn merge(
     Some((text, merged))
 }
 
-/// Recent folders after this window changed its list from `base` to
-/// `local` while another window may have changed the file's list to `disk`.
-///
-/// Folders this window opened (new, or moved ahead of one they used to
-/// follow) go first, in this window's order; then the file's list, without
-/// anything this window removed.
-fn merge_recent(base: &[PathBuf], local: &[PathBuf], disk: &[PathBuf]) -> Vec<PathBuf> {
-    if disk == base {
-        return local.to_vec();
-    }
-    let position = |list: &[PathBuf], path: &PathBuf| list.iter().position(|p| p == path);
-    let moved_up = |at: usize, path: &PathBuf| {
-        let Some(old) = position(base, path) else {
-            return true;
-        };
-        local[at + 1..]
-            .iter()
-            .any(|later| position(base, later).is_some_and(|o| o < old))
-    };
-    let mut result: Vec<PathBuf> = local
-        .iter()
-        .enumerate()
-        .filter(|(at, path)| moved_up(*at, path))
-        .map(|(_, path)| path.clone())
-        .collect();
-    let removed = |p: &PathBuf| base.contains(p) && !local.contains(p);
-    for path in disk {
-        if !removed(path) && !result.contains(path) {
-            result.push(path.clone());
-        }
-    }
-    result.truncate(MAX_RECENT);
-    result
-}
-
-/// Puts `path` at the top of the recent folders.
-pub fn touch_recent(recent: &mut Vec<PathBuf>, path: &Path) {
-    recent.retain(|p| p != path);
-    recent.insert(0, path.to_owned());
-    recent.truncate(MAX_RECENT);
-}
-
 /// eframe keeps the window's size and place, and egui's own state, in one
 /// file (`app.ron`) that it rewrites whole from what it read at startup. So
 /// only one window may use it: the first to take this lock, which it holds
-/// until it closes. Returns whether this window is that one.
+/// until it closes. Returns whether this window is that one. If the lock
+/// can't be taken at all, no window is: they all leave the file alone.
 pub fn claim_window_state() -> bool {
     static HELD: OnceLock<File> = OnceLock::new();
     let Some(dir) = eframe::storage_dir("feather") else {
-        return true;
+        return false;
     };
     match claim(&dir.join("app.ron.lock")) {
-        Claim::Owner(file) => {
-            let _ = HELD.set(file);
-            true
-        }
-        Claim::Taken => false,
-        // Without a lock, behave as a single window always has.
-        Claim::Unavailable => true,
+        Claim::Owner(file) => HELD.set(file).is_ok(),
+        Claim::Taken | Claim::Unavailable => false,
     }
 }
 
@@ -403,6 +479,26 @@ mod tests {
         dir.join(FILE_NAME)
     }
 
+    fn legacy_of(path: &Path) -> PathBuf {
+        path.with_file_name(LEGACY_FILE_NAME)
+    }
+
+    /// Writes an `app.ron` the way eframe does.
+    fn write_legacy(path: &Path, settings: &Settings) {
+        let mut values = HashMap::new();
+        values.insert(
+            LEGACY_KEY.to_owned(),
+            ron::ser::to_string(settings).unwrap(),
+        );
+        values.insert("egui".to_owned(), "()".to_owned());
+        fs::write(path, ron::ser::to_string(&values).unwrap()).unwrap();
+    }
+
+    /// Opens the store the way a window does, with an `app.ron` beside it.
+    fn open(path: &Path) -> (Store, Settings) {
+        Store::open(Some(path.to_owned()), Some(legacy_of(path)))
+    }
+
     fn read(path: &Path) -> Settings {
         let text = read_text(path).unwrap().unwrap();
         decode(&text, &Settings::default()).unwrap().1
@@ -413,57 +509,86 @@ mod tests {
     }
 
     #[test]
-    fn touching_moves_a_folder_to_the_top() {
+    fn opening_moves_a_folder_to_the_top() {
         let mut recent = paths(&["a", "b", "c"]);
-        touch_recent(&mut recent, Path::new("c"));
+        RecentOp::Open("c".into()).apply(&mut recent);
         assert_eq!(recent, paths(&["c", "a", "b"]));
-        touch_recent(&mut recent, Path::new("d"));
+        RecentOp::Open("d".into()).apply(&mut recent);
         assert_eq!(recent, paths(&["d", "c", "a", "b"]));
         for i in 0..20 {
-            touch_recent(&mut recent, Path::new(&format!("n{i}")));
+            RecentOp::Open(format!("n{i}").into()).apply(&mut recent);
         }
         assert_eq!(recent.len(), MAX_RECENT);
         assert_eq!(recent[0], PathBuf::from("n19"));
+        RecentOp::Forget("n19".into()).apply(&mut recent);
+        assert_eq!(recent[0], PathBuf::from("n18"));
+        RecentOp::Clear.apply(&mut recent);
+        assert!(recent.is_empty());
+    }
+
+    /// Two windows starting from `start`; the first opens `first` and saves,
+    /// then the second, not having looked since, opens `second` and saves.
+    fn two_windows_open(start: &[&str], first: &[RecentOp], second: &[RecentOp]) -> Vec<PathBuf> {
+        let path = temp_file("recent");
+        let initial = Settings {
+            recent: paths(start),
+            ..Settings::default()
+        };
+        write_text(&path, &encode(&to_map(&initial).unwrap()).unwrap()).unwrap();
+        let (mut one, mut a) = open(&path);
+        let (mut two, mut b) = open(&path);
+        for op in first {
+            one.recent(&mut a, op.clone());
+        }
+        one.flush(&mut a);
+        for op in second {
+            two.recent(&mut b, op.clone());
+        }
+        two.flush(&mut b);
+        let result = read(&path).recent;
+        assert_eq!(b.recent, result);
+        clean_up(&path);
+        result
     }
 
     #[test]
     fn recents_from_two_windows_are_combined() {
-        let base = paths(&["a", "b", "c"]);
-        // This window opened x; another opened y meanwhile.
-        let local = paths(&["x", "a", "b", "c"]);
-        let disk = paths(&["y", "a", "b", "c"]);
+        let open = |p: &str| RecentOp::Open(p.into());
         assert_eq!(
-            merge_recent(&base, &local, &disk),
+            two_windows_open(&["a", "b", "c"], &[open("y")], &[open("x")]),
             paths(&["x", "y", "a", "b", "c"])
         );
-    }
-
-    #[test]
-    fn reopening_older_folders_moves_them_up_in_order() {
-        let base = paths(&["a", "b", "c"]);
-        let local = paths(&["c", "a", "b"]);
-        let disk = paths(&["y", "a", "b", "c"]);
+        // Opened b, then c, before saving: both kept, in order.
         assert_eq!(
-            merge_recent(&base, &local, &disk),
-            paths(&["c", "y", "a", "b"])
-        );
-        // Opened b, then c, before the list was saved.
-        let local = paths(&["c", "b", "a"]);
-        assert_eq!(merge_recent(&base, &local, &base), local);
-        assert_eq!(
-            merge_recent(&base, &local, &disk),
+            two_windows_open(&["a", "b", "c"], &[open("y")], &[open("b"), open("c")]),
             paths(&["c", "b", "y", "a"])
         );
+        // A full list: what falls off the end isn't a removal.
+        let full = ["a", "b", "c", "d", "e", "f", "g", "h"];
+        assert_eq!(
+            two_windows_open(&full, &[open("h")], &[open("i")]),
+            paths(&["i", "h", "a", "b", "c", "d", "e", "f"])
+        );
+        // Opening what is already at the top here still counts.
+        assert_eq!(
+            two_windows_open(&["a", "b"], &[open("b")], &[open("a")]),
+            paths(&["a", "b"])
+        );
     }
 
     #[test]
-    fn removing_a_recent_folder_sticks() {
-        let base = paths(&["a", "b", "c"]);
-        let local = paths(&["b", "c"]);
-        let disk = paths(&["y", "a", "b", "c"]);
-        assert_eq!(merge_recent(&base, &local, &disk), paths(&["y", "b", "c"]));
-        // Clearing the list keeps only what other windows added since.
-        assert_eq!(merge_recent(&base, &[], &disk), paths(&["y"]));
+    fn removing_recent_folders_sticks() {
+        let forget = RecentOp::Forget("a".into());
+        let open = RecentOp::Open("y".into());
+        assert_eq!(
+            two_windows_open(&["a", "b", "c"], std::slice::from_ref(&open), &[forget]),
+            paths(&["y", "b", "c"])
+        );
+        // Clearing keeps only what other windows open afterwards.
+        assert_eq!(
+            two_windows_open(&["a", "b", "c"], &[RecentOp::Clear], &[open]),
+            paths(&["y"])
+        );
     }
 
     #[test]
@@ -482,7 +607,7 @@ mod tests {
         };
         let disk_map = to_map(&disk).unwrap();
 
-        let (text, merged) = merge(&base, &local, Some((disk_map, disk))).unwrap();
+        let (text, merged) = merge(&base, &local, &[], Some((disk_map, disk))).unwrap();
         let written = decode(&text, &base).unwrap().1;
         assert_eq!(written.font_size, 15.0);
         assert_eq!(written.theme, ThemeChoice::Dark);
@@ -494,7 +619,7 @@ mod tests {
 
         // ...but another window's change to it doesn't reach into this one.
         let local_map = to_map(&local).unwrap();
-        let (text, merged) = merge(&base, &base, Some((local_map, local))).unwrap();
+        let (text, merged) = merge(&base, &base, &[], Some((local_map, local))).unwrap();
         let written = decode(&text, &base).unwrap().1;
         assert_eq!(written.terminal_dock, TerminalDock::Right);
         assert!(merged.sidebar_open);
@@ -520,7 +645,7 @@ mod tests {
             font_size: 16.0,
             ..base.clone()
         };
-        let (text, merged) = merge(&base, &local, Some((raw, disk))).unwrap();
+        let (text, merged) = merge(&base, &local, &[], Some((raw, disk))).unwrap();
         let Value::Object(written) = serde_json::from_str(&text).unwrap() else {
             panic!("not an object");
         };
@@ -533,16 +658,16 @@ mod tests {
     #[test]
     fn two_windows_share_one_file() {
         let path = temp_file("share");
-        let (mut one, mut a) = Store::open(Some(path.clone()), Some(Settings::default()));
-        let (mut two, mut b) = Store::open(Some(path.clone()), None);
+        let (mut one, mut a) = open(&path);
+        let (mut two, mut b) = open(&path);
         assert_eq!(a, b);
 
         a.theme = ThemeChoice::Light;
-        touch_recent(&mut a.recent, Path::new("/one"));
+        one.recent(&mut a, RecentOp::Open("/one".into()));
         one.flush(&mut a);
 
         b.font_size = 16.0;
-        touch_recent(&mut b.recent, Path::new("/two"));
+        two.recent(&mut b, RecentOp::Open("/two".into()));
         two.flush(&mut b);
         assert_eq!(b.theme, ThemeChoice::Light, "picked up the other window's");
         assert_eq!(b.font_size, 16.0);
@@ -552,7 +677,7 @@ mod tests {
         // if both writes landed within one tick of the file's clock.
         one.flush(&mut a);
         assert_eq!(a, b);
-        let (_, fresh) = Store::open(Some(path.clone()), None);
+        let (_, fresh) = open(&path);
         assert_eq!(fresh, b);
         clean_up(&path);
     }
@@ -560,10 +685,10 @@ mod tests {
     #[test]
     fn changes_are_written_once_they_settle() {
         let path = temp_file("settle");
-        let (mut store, mut settings) = Store::open(Some(path.clone()), Some(Settings::default()));
+        let (mut store, mut settings) = open(&path);
         settings.font_size = 14.0;
         assert!(store.tick(&mut settings, 10.0).is_some());
-        assert_eq!(read(&path).font_size, 12.5, "not yet");
+        assert_eq!(read_text(&path).unwrap(), None, "not yet");
         assert!(store.tick(&mut settings, 10.2).is_some());
         assert_eq!(store.tick(&mut settings, 10.6), None);
         assert_eq!(read(&path).font_size, 14.0);
@@ -573,12 +698,12 @@ mod tests {
     #[test]
     fn a_failed_write_is_kept_and_tried_again() {
         let path = temp_file("retry");
-        let (mut store, mut settings) = Store::open(Some(path.clone()), Some(Settings::default()));
+        let (mut store, mut settings) = open(&path);
         // A folder where the file should be can't be read, as when another
         // program has it open: nothing is overwritten, and nothing is lost.
-        fs::remove_file(&path).unwrap();
         fs::create_dir(&path).unwrap();
         settings.font_size = 18.0;
+        store.recent(&mut settings, RecentOp::Open("/kept".into()));
         assert!(store.tick(&mut settings, 0.0).is_some());
         assert!(
             store.tick(&mut settings, 1.0).is_some(),
@@ -586,37 +711,111 @@ mod tests {
         );
         assert!(path.is_dir());
         assert_eq!(settings.font_size, 18.0);
-        assert_ne!(store.base, settings);
 
         fs::remove_dir(&path).unwrap();
-        fs::write(&path, "{}").unwrap();
         assert!(store.tick(&mut settings, 1.6).is_none());
-        assert_eq!(settings.font_size, 18.0);
-        assert_eq!(read(&path).font_size, 18.0);
+        let written = read(&path);
+        assert_eq!(written.font_size, 18.0);
+        assert_eq!(written.recent, paths(&["/kept"]));
+        clean_up(&path);
+    }
+
+    #[test]
+    fn a_file_that_cant_be_read_is_left_alone() {
+        let path = temp_file("broken");
+        let (mut store, mut settings) = open(&path);
+        settings.font_size = 14.0;
+        store.flush(&mut settings);
+        // Half a file, as a crash in some other program might leave it.
+        let broken = "{\n  \"font_size\": 16.0,\n  \"rec";
+        fs::write(&path, broken).unwrap();
+
+        // Neither looking for changes nor saving its own replaces it.
+        assert_eq!(store.tick(&mut settings, 100.0), None);
+        assert_eq!(fs::read_to_string(&path).unwrap(), broken);
+        settings.zoom = 1.1;
+        store.flush(&mut settings);
+        assert_eq!(fs::read_to_string(&path).unwrap(), broken);
+        assert_eq!(settings.zoom, 1.1, "kept for when it can be read");
+
+        // Once it can be read again, the change goes in.
+        fs::write(&path, "{}").unwrap();
+        store.flush(&mut settings);
+        assert_eq!(read(&path).zoom, 1.1);
         clean_up(&path);
     }
 
     #[test]
     fn an_old_save_moves_into_the_file() {
-        let path = temp_file("fallback");
+        let path = temp_file("legacy");
         let old = Settings {
+            font_size: 19.0,
             recent: paths(&["/old"]),
             ..Settings::default()
         };
-        let (_, settings) = Store::open(Some(path.clone()), Some(old));
-        assert_eq!(settings.recent, paths(&["/old"]));
+        write_legacy(&legacy_of(&path), &old);
+        let (_, settings) = open(&path);
+        assert_eq!(settings.font_size, 19.0);
         assert_eq!(read(&path).recent, paths(&["/old"]));
         // Once the file exists it wins over the old save.
-        let (_, settings) = Store::open(Some(path.clone()), Some(Settings::default()));
-        assert_eq!(settings.recent, paths(&["/old"]));
+        write_legacy(&legacy_of(&path), &Settings::default());
+        let (_, settings) = open(&path);
+        assert_eq!(settings.font_size, 19.0);
+        clean_up(&path);
+    }
+
+    #[test]
+    fn any_window_can_move_the_old_save_over() {
+        // The second window gets there before the first.
+        let path = temp_file("race");
+        let old = Settings {
+            font_size: 19.0,
+            recent: paths(&["/old"]),
+            ..Settings::default()
+        };
+        write_legacy(&legacy_of(&path), &old);
+        let (mut second, mut b) = open(&path);
+        assert_eq!(b.font_size, 19.0);
+        second.recent(&mut b, RecentOp::Open("/second".into()));
+        second.flush(&mut b);
+
+        let (_, a) = open(&path);
+        assert_eq!(a.font_size, 19.0);
+        assert_eq!(a.recent, paths(&["/second", "/old"]));
+        clean_up(&path);
+    }
+
+    #[test]
+    fn an_old_save_that_cant_be_read_yet_isnt_replaced() {
+        let path = temp_file("legacy-broken");
+        fs::write(legacy_of(&path), "{\"feather\": \"(font_si").unwrap();
+        let (mut store, mut settings) = open(&path);
+        assert_eq!(read_text(&path).unwrap(), None);
+        settings.zoom = 1.1;
+        store.flush(&mut settings);
+        assert_eq!(
+            read_text(&path).unwrap(),
+            None,
+            "not taken for a fresh install"
+        );
+
+        let old = Settings {
+            font_size: 19.0,
+            ..Settings::default()
+        };
+        write_legacy(&legacy_of(&path), &old);
+        store.flush(&mut settings);
+        let written = read(&path);
+        assert_eq!(written.font_size, 19.0);
+        assert_eq!(written.zoom, 1.1);
         clean_up(&path);
     }
 
     #[test]
     fn nothing_is_written_until_there_is_something_to_keep() {
         let path = temp_file("empty");
-        let (mut store, mut settings) = Store::open(Some(path.clone()), None);
-        assert_eq!(read_text(&path).unwrap(), None);
+        let (mut store, mut settings) = open(&path);
+        assert_eq!(settings, defaults());
         store.flush(&mut settings);
         assert_eq!(read_text(&path).unwrap(), None);
         settings.zoom = 1.1;
@@ -642,6 +841,13 @@ mod tests {
         assert!(matches!(claim(&path), Claim::Taken));
         drop(first);
         assert!(matches!(claim(&path), Claim::Owner(_)));
+        // Somewhere the lock can't even be made: nobody owns it.
+        let blocked = path.with_file_name("not-a-folder");
+        fs::write(&blocked, "").unwrap();
+        assert!(matches!(
+            claim(&blocked.join("app.ron.lock")),
+            Claim::Unavailable
+        ));
         clean_up(&path);
     }
 }
