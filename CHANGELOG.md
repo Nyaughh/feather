@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.2
+
+- **A new look**: Feather has a real logo now, a feather drawn by a designer, on a warm "golden-hour" tile that fades from cream to a soft rose-peach. It is the app icon on every system and is used across the website.
+- **Golden-hour blush is the default accent**: buttons, selections, links and focus rings take the blush in dark mode and a deeper terracotta in light mode, so text on them stays easy to read. Choose a different accent under **Settings > Accent colour**: Monochrome, Deep blue, Teal, Soft violet, Indigo, Orange or Pink, or keep the theme's own. Accents you had picked before are kept.
+- **Terminal on the right**: the terminal's "..." menu has **Dock at Bottom** and **Dock on Right**, so it can sit beside your files as a tall panel. Feather remembers where you put it and how big it was in each place.
+- **Split terminals**: split a terminal tab to run shells side by side (stacked when the terminal is on the right) with the split button, the "..." menu, or Ctrl+Shift+5 (Cmd+\ on macOS). Click a split or press Ctrl+Alt+Left/Right to move between them, and close one from its own title strip.
+- **The `feather` command**: open things from a terminal the way `code` opens VS Code. `feather .` or `feather some-folder` opens a folder, and `feather main.rs` opens a file (a new file is created when you save it). If the folder is already open, that window comes to the front. Try `feather --help`. The Windows installer puts `feather` on your PATH; on macOS and Linux, use **Settings > Command line > Install**.
+- **Several windows**: open more than one repository at once. Each window has its own folder, tabs, terminals and Git view, and closing one leaves the others open.
+- **File menu**: at the top left of the window, with New Window (Ctrl+Shift+N), Open File (Ctrl+Shift+O), Open Folder (Ctrl+O), Open Recent, Close Folder and Close Window (Ctrl+Shift+W). Close Folder takes you back to the start screen with your recent folders.
+- Settings and recent folders are shared between windows, and a change in one window shows up in the others.
+- Ctrl+Shift+` opens a new terminal again, instead of hiding the panel.
+
 ## 0.6.1
 
 - **Commits, more like VS Code**: the list now sits under Pull, Push and Fetch and starts folded; Feather remembers whether you opened it. Each row shows the author after the message, and branches and tags as labelled pills (your current branch highlighted, remote branches with a cloud, tags with a tag). Rest the pointer on a commit for a card beside the sidebar with the author, the exact date, the whole message, how many files and lines it changed, its branches, and buttons to copy the hash or open it on GitHub.
