@@ -9,11 +9,12 @@ use eframe::egui::{
 
 use super::virtual_rows;
 use super::widgets::{
-    ButtonKind, button, elided, empty_state, icon_button, menu_item, menu_separator, paint_galley,
-    paint_icon, paint_row_bg, plain_item, popup_frame, submenu, submenu_row,
+    ButtonKind, button, elided, empty_state, icon_button, menu_item, menu_item_with_detail,
+    menu_separator, paint_galley, paint_icon, paint_row_bg, plain_item, popup_frame, submenu,
+    submenu_row,
 };
 use crate::app::{Cmd, Repo, Tab, View};
-use crate::git::{Branch, Change, ChangeKind, Commit, Stash};
+use crate::git::{Branch, Change, ChangeKind, Commit, Stash, Worktree};
 use crate::settings::Settings;
 use crate::theme::{self, ROW_HEIGHT, icon};
 use crate::worker::Action;
@@ -1627,7 +1628,7 @@ fn footer_row(ui: &Ui, rect: Rect, id: &str, glyph: &str, label: &str, detail: &
     response
 }
 
-fn worktree_picker(ui: &mut Ui, rect: Rect, repo: &Repo, cmds: &mut Vec<Cmd>) {
+fn worktree_picker(ui: &mut Ui, rect: Rect, repo: &mut Repo, cmds: &mut Vec<Cmd>) {
     let detail = match repo.worktrees.len() {
         0 | 1 => String::new(),
         n => n.to_string(),
@@ -1642,32 +1643,71 @@ fn worktree_picker(ui: &mut Ui, rect: Rect, repo: &Repo, cmds: &mut Vec<Cmd>) {
     )
     .on_hover_text("Switch worktree");
 
-    Popup::menu(&response)
-        .frame(popup_frame())
-        .align(RectAlign::TOP_START)
-        // Stay put above the row even as the list changes size.
-        .align_alternatives(&[RectAlign::TOP_START])
-        .gap(4.0)
-        .show(|ui| {
-            ui.set_width(rect.width().max(260.0));
-            ui.spacing_mut().item_spacing.y = 0.0;
-            section_label(ui, "Worktrees");
-            if repo.worktrees.is_empty() {
-                menu_item(ui, None, &repo.name, None, true);
-            }
-            for worktree in &repo.worktrees {
-                let branch = worktree
-                    .branch
-                    .clone()
-                    .unwrap_or_else(|| format!("{} (detached)", worktree.head));
-                let current = worktree.path == repo.root;
-                if menu_item(ui, None, &worktree.name(), Some(&branch), current).clicked()
-                    && !current
+    if response.clicked() {
+        // Let the search field take focus even when opened from the keyboard.
+        ui.memory_mut(|m| m.stop_text_input());
+    }
+    let chosen = picker_popup(
+        &response,
+        &mut repo.worktree_filter,
+        "Switch worktree…",
+        |ui, filter| {
+            let mut matches = matching_worktrees(&repo.worktrees, filter).peekable();
+            if matches.peek().is_none() {
+                // Keep showing the current repository until the worktree list arrives.
+                if repo.worktrees.is_empty()
+                    && picker_filter(filter)(&repo.name, repo.status.branch.as_deref())
                 {
-                    cmds.push(Cmd::OpenRepo(worktree.path.clone()));
+                    return menu_item(ui, Some(icon::TREE_STRUCTURE), &repo.name, None, true)
+                        .clicked()
+                        .then_some(&repo.root);
                 }
+                section_label(ui, "No worktrees");
+                return None;
             }
-        });
+            let enter = !filter.is_empty() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            picker_list()
+                .show(ui, |ui| {
+                    let mut chosen = None;
+                    for (i, (worktree, name, branch)) in matches.enumerate() {
+                        let current = worktree.path == repo.root;
+                        let clicked = menu_item_with_detail(
+                            ui,
+                            icon::TREE_STRUCTURE,
+                            &name,
+                            &branch,
+                            current,
+                        )
+                        .clicked();
+                        if (clicked || (enter && i == 0 && !current)) && chosen.is_none() {
+                            chosen = Some(&worktree.path);
+                        }
+                    }
+                    chosen
+                })
+                .inner
+        },
+    );
+    if let Some(path) = chosen
+        && path != &repo.root
+    {
+        cmds.push(Cmd::OpenRepo(path.clone()));
+    }
+}
+
+fn matching_worktrees<'a>(
+    worktrees: &'a [Worktree],
+    filter: &str,
+) -> impl Iterator<Item = (&'a Worktree, String, String)> {
+    let matches = picker_filter(filter);
+    worktrees.iter().filter_map(move |worktree| {
+        let name = worktree.name();
+        let branch = worktree
+            .branch
+            .clone()
+            .unwrap_or_else(|| format!("{} (detached)", worktree.head));
+        matches(&name, Some(&branch)).then_some((worktree, name, branch))
+    })
 }
 
 fn branch_picker(ui: &mut Ui, rect: Rect, repo: &mut Repo, cmds: &mut Vec<Cmd>) {
@@ -1685,13 +1725,97 @@ fn branch_picker(ui: &mut Ui, rect: Rect, repo: &mut Repo, cmds: &mut Vec<Cmd>) 
     let response = footer_row(ui, rect, "branch", icon::GIT_BRANCH, &label, &detail)
         .on_hover_text("Switch branch");
     if response.clicked() {
-        repo.branch_filter.clear();
         // Make sure the list is current as it opens.
         cmds.push(Cmd::Refresh);
     }
     let idle = repo.busy.is_none();
 
-    Popup::menu(&response)
+    let chosen = picker_popup(
+        &response,
+        &mut repo.branch_filter,
+        "Switch or create branch…",
+        |ui, filter| {
+            let matches_filter = picker_filter(filter);
+            let current = repo.status.branch.as_deref();
+            let matches: Vec<&Branch> = repo
+                .branches
+                .iter()
+                .filter(|b| matches_filter(&b.name, b.remote.as_deref()))
+                .collect();
+            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let exact = repo
+                .branches
+                .iter()
+                .any(|b| b.name == filter || b.remote.as_deref() == Some(filter));
+            let mut chosen = None;
+
+            picker_list().show(ui, |ui| {
+                for (i, branch) in matches.iter().enumerate() {
+                    let is_current = branch.remote.is_none() && current == Some(&branch.name);
+                    // Branches not checked out here yet say which remote has them.
+                    let origin = branch
+                        .remote
+                        .as_deref()
+                        .and_then(|r| r.strip_suffix(branch.name.as_str()))
+                        .map(|r| r.trim_end_matches('/'));
+                    let clicked =
+                        menu_item(ui, Some(icon::GIT_BRANCH), &branch.name, origin, is_current)
+                            .clicked();
+                    // Enter picks the top match.
+                    let via_enter = enter && i == 0 && !filter.is_empty();
+                    if (clicked || via_enter) && !is_current && chosen.is_none() {
+                        chosen = Some(match &branch.remote {
+                            Some(remote) => Action::Track(remote.clone()),
+                            None => Action::Switch(branch.name.clone()),
+                        });
+                    }
+                }
+            });
+
+            if !filter.is_empty() && !exact {
+                let label = format!("Create branch “{filter}”");
+                let clicked = menu_item(ui, Some(icon::PLUS), &label, None, false).clicked();
+                if (clicked || (enter && matches.is_empty())) && chosen.is_none() {
+                    chosen = Some(Action::CreateBranch(filter.to_owned()));
+                }
+            } else if matches.is_empty() {
+                section_label(ui, "No branches");
+            }
+            chosen
+        },
+    );
+    if let Some(action) = chosen
+        && idle
+    {
+        cmds.push(Cmd::Act(action));
+    }
+}
+
+fn picker_filter(query: &str) -> impl Fn(&str, Option<&str>) -> bool {
+    let needle = query.trim().to_lowercase();
+    move |name, detail| {
+        needle.is_empty()
+            || name.to_lowercase().contains(&needle)
+            || detail.is_some_and(|s| s.to_lowercase().contains(&needle))
+    }
+}
+
+fn picker_list() -> ScrollArea {
+    ScrollArea::vertical()
+        .max_height(240.0)
+        .auto_shrink([false, true])
+}
+
+fn picker_popup<T>(
+    response: &Response,
+    filter: &mut String,
+    hint: &str,
+    show_results: impl FnOnce(&mut Ui, &str) -> Option<T>,
+) -> Option<T> {
+    if response.clicked() {
+        filter.clear();
+    }
+    Popup::menu(response)
         .frame(popup_frame())
         .align(RectAlign::TOP_START)
         // Stay put above the row even as the list changes size.
@@ -1699,7 +1823,7 @@ fn branch_picker(ui: &mut Ui, rect: Rect, repo: &mut Repo, cmds: &mut Vec<Cmd>) 
         .gap(4.0)
         .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
-            ui.set_width(rect.width().max(260.0));
+            ui.set_width(response.rect.width().max(260.0));
             ui.spacing_mut().item_spacing.y = 0.0;
 
             // The popup's own margin is above the field already; matching
@@ -1713,9 +1837,9 @@ fn branch_picker(ui: &mut Ui, rect: Rect, repo: &mut Repo, cmds: &mut Vec<Cmd>) 
                 })
                 .show(ui, |ui| {
                     ui.add(
-                        TextEdit::singleline(&mut repo.branch_filter)
+                        TextEdit::singleline(filter)
                             .align(egui::Align2::LEFT_CENTER)
-                            .hint_text("Switch or create branch…")
+                            .hint_text(hint)
                             .desired_width(f32::INFINITY)
                             .frame(Frame::new()),
                     )
@@ -1733,69 +1857,62 @@ fn branch_picker(ui: &mut Ui, rect: Rect, repo: &mut Repo, cmds: &mut Vec<Cmd>) 
             );
             ui.add_space(4.0);
 
-            let filter = repo.branch_filter.trim().to_owned();
-            let needle = filter.to_lowercase();
-            let current = repo.status.branch.as_deref();
-            let matches: Vec<&Branch> = repo
-                .branches
-                .iter()
-                .filter(|b| {
-                    needle.is_empty()
-                        || b.name.to_lowercase().contains(&needle)
-                        || b.remote
-                            .as_ref()
-                            .is_some_and(|r| r.to_lowercase().contains(&needle))
-                })
-                .collect();
-            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-            let exact = repo
-                .branches
-                .iter()
-                .any(|b| b.name == filter || b.remote.as_deref() == Some(filter.as_str()));
-            let mut chosen: Option<Action> = None;
-
-            ScrollArea::vertical()
-                .max_height(240.0)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    for (i, branch) in matches.iter().enumerate() {
-                        let is_current = branch.remote.is_none() && current == Some(&branch.name);
-                        // Branches not checked out here yet say which remote has them.
-                        let origin = branch
-                            .remote
-                            .as_deref()
-                            .and_then(|r| r.strip_suffix(branch.name.as_str()))
-                            .map(|r| r.trim_end_matches('/'));
-                        let clicked =
-                            menu_item(ui, Some(icon::GIT_BRANCH), &branch.name, origin, is_current)
-                                .clicked();
-                        // Enter picks the top match.
-                        let via_enter = enter && i == 0 && !filter.is_empty();
-                        if (clicked || via_enter) && !is_current && chosen.is_none() {
-                            chosen = Some(match &branch.remote {
-                                Some(remote) => Action::Track(remote.clone()),
-                                None => Action::Switch(branch.name.clone()),
-                            });
-                        }
-                    }
-                });
-
-            if !filter.is_empty() && !exact {
-                let label = format!("Create branch “{filter}”");
-                let clicked = menu_item(ui, Some(icon::PLUS), &label, None, false).clicked();
-                if (clicked || (enter && matches.is_empty())) && chosen.is_none() {
-                    chosen = Some(Action::CreateBranch(filter.clone()));
-                }
-            } else if matches.is_empty() {
-                section_label(ui, "No branches");
-            }
-
-            if let Some(action) = chosen {
-                if idle {
-                    cmds.push(Cmd::Act(action));
-                }
-                repo.branch_filter.clear();
+            let chosen = show_results(ui, filter.trim());
+            if chosen.is_some() {
+                filter.clear();
                 ui.close();
             }
-        });
+            chosen
+        })
+        .and_then(|popup| popup.inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn worktree(path: &str, branch: Option<&str>) -> Worktree {
+        Worktree {
+            path: path.into(),
+            branch: branch.map(str::to_owned),
+            head: "ad1c0de".into(),
+        }
+    }
+
+    #[test]
+    fn worktrees_match_by_name_or_branch_in_list_order() {
+        let worktrees = [
+            worktree("client/Website", Some("main")),
+            worktree("review/Website", Some("feature/Payments")),
+            worktree("Payments-UI", Some("design")),
+        ];
+        let paths = |filter| {
+            matching_worktrees(&worktrees, filter)
+                .map(|(wt, _, _)| &wt.path)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            paths("   "),
+            [&worktrees[0].path, &worktrees[1].path, &worktrees[2].path]
+        );
+        assert_eq!(paths("web"), [&worktrees[0].path, &worktrees[1].path]);
+        assert_eq!(
+            paths("  PAYmEnt  "),
+            [&worktrees[1].path, &worktrees[2].path]
+        );
+        assert_eq!(paths("feature/"), [&worktrees[1].path]);
+        assert!(paths("missing").is_empty());
+        assert!(paths("client").is_empty());
+    }
+
+    #[test]
+    fn detached_worktrees_match_their_displayed_head() {
+        let worktrees = [worktree("preview", None)];
+        for filter in ["VIEW", "AD1C", "detached"] {
+            let (_, name, detail) = matching_worktrees(&worktrees, filter).next().unwrap();
+            assert_eq!(name, "preview");
+            assert_eq!(detail, "ad1c0de (detached)");
+        }
+        assert!(matching_worktrees(&worktrees, "main").next().is_none());
+    }
 }

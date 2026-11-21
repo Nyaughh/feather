@@ -407,6 +407,7 @@ pub struct Repo {
     pub busy: Option<&'static str>,
     pub confirm_discard: Option<Change>,
     pub confirm_discard_all: bool,
+    pub worktree_filter: String,
     pub branch_filter: String,
     pub search: SearchState,
     /// Every file in the repository, once quick open has asked for them.
@@ -450,6 +451,7 @@ impl Repo {
             busy: None,
             confirm_discard: None,
             confirm_discard_all: false,
+            worktree_filter: String::new(),
             branch_filter: String::new(),
             search: SearchState::default(),
             files: None,

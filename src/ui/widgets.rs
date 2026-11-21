@@ -156,6 +156,44 @@ pub fn menu_item(
     detail: Option<&str>,
     checked: bool,
 ) -> Response {
+    menu_row(ui, icon, label, detail, checked, 0.0)
+}
+
+/// A menu item with room for both columns, even when the label is long.
+pub fn menu_item_with_detail(
+    ui: &mut Ui,
+    icon: &str,
+    label: &str,
+    detail: &str,
+    checked: bool,
+) -> Response {
+    let detail_width = elided(
+        ui,
+        detail,
+        theme::ui_font(12.0),
+        theme::text_muted(),
+        ui.available_width() / 3.0,
+    )
+    .size()
+    .x;
+    menu_row(
+        ui,
+        Some(icon),
+        label,
+        Some(detail),
+        checked,
+        detail_width + 8.0,
+    )
+}
+
+fn menu_row(
+    ui: &mut Ui,
+    icon: Option<&str>,
+    label: &str,
+    detail: Option<&str>,
+    checked: bool,
+    reserved_detail: f32,
+) -> Response {
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click());
     let response = response.on_hover_cursor(CursorIcon::PointingHand);
@@ -178,7 +216,13 @@ pub fn menu_item(
         );
         right -= 22.0;
     }
-    let label = elided(ui, label, theme::ui_font(13.0), theme::text(), right - x);
+    let label = elided(
+        ui,
+        label,
+        theme::ui_font(13.0),
+        theme::text(),
+        right - x - reserved_detail,
+    );
     x += paint_galley(ui, x, mid, label) + 8.0;
     if let Some(detail) = detail {
         let detail = elided(
