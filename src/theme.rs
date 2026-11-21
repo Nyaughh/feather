@@ -99,6 +99,29 @@ pub fn accent_swatch(accent: Accent, dark: bool) -> Option<Color32> {
     Some(rgb(if dark { on_dark } else { on_light }))
 }
 
+/// The accent a step further from the text drawn on it, for hovered buttons:
+/// darker under white text, lighter under ink, so hovering never costs contrast.
+pub fn hover_of(accent: Color32) -> Color32 {
+    let away = if text_on(accent) == Color32::WHITE {
+        Color32::BLACK
+    } else {
+        Color32::WHITE
+    };
+    themes::mix(accent, away, 0.14)
+}
+
+/// The accent laid translucently over `base` (a selection, say), at `alpha`
+/// or fainter: pale accents are faded until `text` on the result still reads
+/// at 4.5:1.
+pub fn accent_wash(alpha: f32, base: Color32, text: Color32) -> Color32 {
+    let accent = palette().accent;
+    let mut alpha = alpha;
+    while alpha > 0.1 && themes::contrast(text, themes::mix(base, accent, alpha)) < 4.5 {
+        alpha -= 0.05;
+    }
+    accent.gamma_multiply(alpha)
+}
+
 /// Ink or white, whichever reads better on `fill`.
 pub fn text_on(fill: Color32) -> Color32 {
     const INK: Color32 = Color32::from_rgb(0x14, 0x14, 0x16);
@@ -131,14 +154,9 @@ pub fn resolve(settings: &Settings, system_dark: bool) -> Palette {
         if dark { preset.dark } else { preset.light }
     });
     if let Some(accent) = accent_swatch(settings.accent, palette.dark) {
-        let pop = if palette.dark {
-            Color32::WHITE
-        } else {
-            Color32::BLACK
-        };
         palette.accent = accent;
-        palette.accent_hover = themes::mix(accent, pop, 0.14);
     }
+    palette.accent_hover = hover_of(palette.accent);
     palette.code_size = settings.font_size;
     palette
 }
@@ -552,6 +570,67 @@ mod tests {
                 Some(palette.accent),
                 accent_swatch(Accent::Blush, palette.dark)
             );
+        }
+    }
+
+    /// The text chosen for a button's resting fill still reads on its hover
+    /// fill, for every theme and accent, and never reads worse than at rest.
+    #[test]
+    fn hovering_keeps_text_readable() {
+        for preset in themes::presets() {
+            for dark in [true, false] {
+                for accent in Accent::ALL {
+                    let settings = Settings {
+                        theme_name: preset.id.to_owned(),
+                        theme: if dark {
+                            ThemeChoice::Dark
+                        } else {
+                            ThemeChoice::Light
+                        },
+                        accent,
+                        ..Settings::default()
+                    };
+                    let p = resolve(&settings, dark);
+                    let text = text_on(p.accent);
+                    let (rest, hover) = (
+                        themes::contrast(text, p.accent),
+                        themes::contrast(text, p.accent_hover),
+                    );
+                    assert!(hover >= rest, "{} {accent:?} dark={dark}", preset.name);
+                    if accent != Accent::Theme || preset.id == themes::DEFAULT_THEME {
+                        assert!(hover >= 4.5, "{} {accent:?} dark={dark}", preset.name);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Plain text in a terminal selection stays readable whatever the accent.
+    #[test]
+    fn selections_keep_text_readable() {
+        for dark in [true, false] {
+            for accent in Accent::ALL {
+                let settings = Settings {
+                    theme: if dark {
+                        ThemeChoice::Dark
+                    } else {
+                        ThemeChoice::Light
+                    },
+                    accent,
+                    ..Settings::default()
+                };
+                let p = resolve(&settings, dark);
+                CURRENT.with(|c| c.set(p));
+                let text = p.syntax[syntax::TEXT as usize];
+                let wash = accent_wash(0.45, p.bg_panel, text);
+                // What the wash looks like once painted over the panel.
+                let alpha = f32::from(wash.a()) / 255.0;
+                let painted = themes::mix(p.bg_panel, p.accent, alpha);
+                assert!(
+                    themes::contrast(text, painted) >= 4.5,
+                    "{accent:?} dark={dark}"
+                );
+            }
         }
     }
 

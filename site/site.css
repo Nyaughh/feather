@@ -58,6 +58,8 @@ main > section, .nav, footer { width: min(var(--page), 100% - 40px); margin-inli
 .btn.primary { color: var(--on-accent); background: var(--accent); border-color: transparent; }
 .btn.primary:hover { background: var(--accent-hover); }
 .btn .size { color: inherit; opacity: .65; font-weight: 400; }
+/* Dimmed less on the pale accent, so it still reads at 4.5:1 or better. */
+.btn.primary .size { opacity: .8; }
 .btn .size:empty { display: none; }
 
 .kicker { font-size: .8125rem; font-weight: 500; color: var(--text-3); letter-spacing: .01em; }

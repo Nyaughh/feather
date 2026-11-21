@@ -429,7 +429,7 @@ pub fn presets() -> &'static [Preset] {
                 // Feather's light half, but keeping Midnight's indigo accent.
                 light: Palette {
                     accent: rgb(0x5e6ad2),
-                    accent_hover: rgb(0x4f5bc4),
+                    accent_hover: rgb(0x515bb5),
                     link: rgb(0x4a56c9),
                     ..FEATHER_LIGHT
                 },

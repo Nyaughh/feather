@@ -567,7 +567,7 @@ fn screen(ui: &mut Ui, rect: Rect, terminal: &mut Terminal) {
     let painter = ui.painter_at(rect);
     let screen = terminal.screen();
     let default_fg = theme::syntax_color(syntax::TEXT);
-    let selection_bg = theme::accent().gamma_multiply(0.45);
+    let selection_bg = theme::accent_wash(0.45, theme::bg_panel(), default_fg);
     let mut run = String::new();
     for row in 0..rows {
         let y = inner.top() + f32::from(row) * cell_h;
