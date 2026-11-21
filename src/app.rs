@@ -16,7 +16,7 @@ use crate::git::{
     Stash, Status, Worktree,
 };
 use crate::settings::{Settings, TerminalDock};
-use crate::store::{self, RecentOp, Store};
+use crate::store::{RecentOp, Store};
 use crate::terminal::Terminals;
 use crate::tree::Tree;
 use crate::update::{self, Updater};
@@ -958,7 +958,7 @@ pub struct Startup {
     /// Why the path on the command line couldn't be opened, to show.
     pub error: Option<String>,
     /// This window looks after eframe's saved state (`app.ron`); see
-    /// [`store::claim_window_state`].
+    /// [`crate::store::claim_window_state`].
     pub owns_window_state: bool,
 }
 
@@ -1654,10 +1654,11 @@ impl eframe::App for App {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        self.store.flush(&mut self.settings);
-        // Still kept here too, for going back to an older version.
         if self.owns_window_state {
-            eframe::set_value(storage, store::LEGACY_KEY, &self.settings);
+            // Also kept where older versions look, for going back to one.
+            self.store.save_with_legacy(&mut self.settings, storage);
+        } else {
+            self.store.flush(&mut self.settings);
         }
     }
 

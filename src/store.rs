@@ -22,7 +22,7 @@ const FILE_NAME: &str = "settings.json";
 /// eframe's own saved state, where versions before this file kept settings.
 const LEGACY_FILE_NAME: &str = "app.ron";
 /// The key the settings had in it.
-pub const LEGACY_KEY: &str = "feather";
+const LEGACY_KEY: &str = "feather";
 /// How long settings sit unwritten after they change, so dragging a slider
 /// doesn't write the file on every frame. Also the wait before trying again
 /// when a write fails.
@@ -77,6 +77,10 @@ pub struct Store {
     /// When the settings first differed from `base`.
     changed_at: Option<f64>,
     last_check: f64,
+    /// The settings came from a file this window could read (or there was
+    /// nothing to read). Until then they are only a stand-in, and are never
+    /// written over the copy older versions read.
+    settled: bool,
 }
 
 /// What an older version saved.
@@ -112,8 +116,10 @@ impl Store {
             recent_ops: Vec::new(),
             changed_at: None,
             last_check: f64::NEG_INFINITY,
+            settled: false,
         };
         let Some(path) = path else {
+            store.settled = true;
             return (store, defaults());
         };
         // Read and, if need be, created under the lock, so a window starting
@@ -123,11 +129,12 @@ impl Store {
             Ok(Some(text)) => {
                 if let Some((_, settings)) = decode(&text, &store.base) {
                     store.base = settings;
+                    store.settled = true;
                 }
                 store.seen = Some(text);
             }
-            Ok(None) => {
-                if let Legacy::Found(settings) = store.read_legacy() {
+            Ok(None) => match store.read_legacy() {
+                Legacy::Found(settings) => {
                     // Without the lock this stays read-only; a later write
                     // moves it over.
                     if lock.is_some()
@@ -137,8 +144,12 @@ impl Store {
                         store.seen = Some(text);
                     }
                     store.base = settings;
+                    store.settled = true;
                 }
-            }
+                Legacy::Nothing => store.settled = true,
+                // Tried again until it can be read.
+                Legacy::Unreadable => {}
+            },
             // Unreadable for now: start from the defaults, and take the file
             // in once it can be read.
             Err(_) => {}
@@ -175,7 +186,8 @@ impl Store {
             }
         } else if now - self.last_check >= CHECK_EVERY {
             self.last_check = now;
-            if self.changed_on_disk() {
+            // Also keeps trying to read settings it couldn't at first.
+            if !self.settled || self.changed_on_disk() {
                 self.sync(settings);
             }
         }
@@ -185,14 +197,27 @@ impl Store {
     /// Writes any changes now, for when the window is closing.
     pub fn flush(&mut self, settings: &mut Settings) {
         for attempt in 0..5 {
-            if !self.has_changes(settings) && !self.changed_on_disk() {
+            let pending = self.has_changes(settings);
+            if !pending && self.settled && !self.changed_on_disk() {
                 return;
             }
-            if self.sync(settings) {
+            // Retried only for changes that would otherwise be lost.
+            if self.sync(settings) || !pending {
                 return;
             }
             // Another window may have the file open for a moment.
             std::thread::sleep(std::time::Duration::from_millis(20 << attempt));
+        }
+    }
+
+    /// For the window that keeps eframe's state: writes any changes, then
+    /// keeps a copy of the settings where older versions look for them. Only
+    /// settings that were actually read go there, never a stand-in for ones
+    /// that couldn't be, so a good copy is never replaced by defaults.
+    pub fn save_with_legacy(&mut self, settings: &mut Settings, storage: &mut dyn eframe::Storage) {
+        self.flush(settings);
+        if self.settled {
+            eframe::set_value(storage, LEGACY_KEY, settings);
         }
     }
 
@@ -266,6 +291,7 @@ impl Store {
             return false;
         }
         self.seen = Some(text);
+        self.settled = true;
         self.base = merged.clone();
         self.recent_ops.clear();
         self.changed_at = None;
@@ -808,6 +834,93 @@ mod tests {
         let written = read(&path);
         assert_eq!(written.font_size, 19.0);
         assert_eq!(written.zoom, 1.1);
+        clean_up(&path);
+    }
+
+    /// eframe's storage, as the window that owns it sees it.
+    #[derive(Default)]
+    struct Storage(HashMap<String, String>);
+
+    impl eframe::Storage for Storage {
+        fn get_string(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+        fn set_string(&mut self, key: &str, value: String) {
+            self.0.insert(key.to_owned(), value);
+        }
+        fn remove_string(&mut self, key: &str) {
+            self.0.remove(key);
+        }
+        fn flush(&mut self) {}
+    }
+
+    impl Storage {
+        /// What eframe loads from an `app.ron`, if it can read it.
+        fn load(path: &Path) -> Self {
+            let text = fs::read_to_string(path).unwrap();
+            Self(ron::from_str(&text).unwrap_or_default())
+        }
+
+        fn legacy(&self) -> Option<Settings> {
+            eframe::get_value(self, LEGACY_KEY)
+        }
+    }
+
+    #[test]
+    fn a_good_old_copy_isnt_replaced_by_defaults() {
+        // settings.json is broken, but app.ron beside it is fine.
+        let path = temp_file("downgrade");
+        let old = Settings {
+            font_size: 19.0,
+            recent: paths(&["/legacy"]),
+            ..Settings::default()
+        };
+        write_legacy(&legacy_of(&path), &old);
+        let broken = "{\n  \"font_size\": 16.0,\n  \"rec";
+        fs::write(&path, broken).unwrap();
+        let mut storage = Storage::load(&legacy_of(&path));
+
+        let (mut store, mut settings) = open(&path);
+        assert_eq!(settings, defaults(), "only a stand-in");
+        store.save_with_legacy(&mut settings, &mut storage);
+        assert_eq!(storage.legacy(), Some(old.clone()), "the old copy is kept");
+        assert_eq!(fs::read_to_string(&path).unwrap(), broken);
+
+        // With settings.json gone, the old copy is moved over again.
+        fs::remove_file(&path).unwrap();
+        store.save_with_legacy(&mut settings, &mut storage);
+        assert_eq!(settings.font_size, 19.0);
+        assert_eq!(read(&path).recent, paths(&["/legacy"]));
+        assert_eq!(storage.legacy().unwrap().font_size, 19.0);
+        clean_up(&path);
+    }
+
+    #[test]
+    fn an_old_copy_read_late_is_still_moved_over() {
+        // app.ron couldn't be read when the window opened.
+        let path = temp_file("late");
+        fs::write(legacy_of(&path), "{\"feather\": \"(font_si").unwrap();
+        let (mut store, mut settings) = open(&path);
+        let mut storage = Storage::load(&legacy_of(&path));
+        store.save_with_legacy(&mut settings, &mut storage);
+        assert_eq!(
+            storage.legacy(),
+            None,
+            "defaults aren't saved as the old copy"
+        );
+
+        let old = Settings {
+            font_size: 19.0,
+            ..Settings::default()
+        };
+        write_legacy(&legacy_of(&path), &old);
+        // Picked up while the window is open...
+        assert_eq!(store.tick(&mut settings, 5.0), None);
+        assert_eq!(settings.font_size, 19.0);
+        // ...and so what it saves on closing is the real thing.
+        store.save_with_legacy(&mut settings, &mut storage);
+        assert_eq!(storage.legacy().unwrap().font_size, 19.0);
+        assert_eq!(read(&path).font_size, 19.0);
         clean_up(&path);
     }
 
