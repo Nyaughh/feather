@@ -639,7 +639,7 @@ fn update_prompt(ctx: &egui::Context, updater: &mut Updater, cmds: &mut Vec<Cmd>
         ),
         State::Installing(release) => (
             format!("Updating to Feather {}…", release.version),
-            "Downloading and checking the new version.".to_owned(),
+            updater.install_status(),
         ),
         State::Ready(release) => (
             format!("Feather {} is installed", release.version),

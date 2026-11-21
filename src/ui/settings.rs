@@ -227,9 +227,14 @@ fn body(ui: &mut Ui, settings: &mut Settings, updater: &Updater, cmds: &mut Vec<
             format!("Version {} is available.", release.version),
             Some(("Download", Cmd::OpenUrl(release.page.clone()))),
         ),
-        update::State::Installing(release) => {
-            (format!("Installing version {}…", release.version), None)
-        }
+        update::State::Installing(release) => (
+            format!(
+                "Installing version {}. {}",
+                release.version,
+                updater.install_status()
+            ),
+            None,
+        ),
         update::State::Ready(release) => (
             format!(
                 "Version {} is installed. Restart to use it.",

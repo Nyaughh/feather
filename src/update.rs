@@ -12,6 +12,8 @@ use eframe::egui;
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -23,6 +25,17 @@ pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const RECHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 /// Nothing we ship is anywhere near this; it only bounds a bad response.
 const MAX_DOWNLOAD_BYTES: u64 = 200 * 1024 * 1024;
+/// Asking GitHub about the latest release is one small reply.
+const CHECK_TIMEOUT: Duration = Duration::from_secs(60);
+/// Setting up a connection, and then waiting for GitHub to start answering.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+/// A download takes as long as the connection needs (the program is over
+/// 16 MB, and GitHub's downloads can run at a few dozen KB/s), but gives up
+/// once nothing at all has arrived for this long.
+const STALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bounds a download that never quite stalls but never finishes either.
+const DOWNLOAD_LIMIT: Duration = Duration::from_secs(60 * 60);
 
 /// The release file for this kind of computer, if we publish one.
 const ASSET: Option<&str> = if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
@@ -70,6 +83,30 @@ enum Message {
     Installed(Result<(), String>),
 }
 
+/// How far an install has got, shared with the thread doing it.
+#[derive(Default)]
+struct Progress {
+    /// Bytes of the program downloaded so far.
+    received: AtomicU64,
+    /// Its size, or 0 while unknown.
+    total: AtomicU64,
+    /// Downloaded and checked; now being written over the installed copy.
+    installing: AtomicBool,
+}
+
+impl Progress {
+    fn describe(&self) -> String {
+        if self.installing.load(Ordering::Relaxed) {
+            return "Checking and installing the new version.".to_owned();
+        }
+        let total = self.total.load(Ordering::Relaxed);
+        describe_download(
+            self.received.load(Ordering::Relaxed),
+            (total > 0).then_some(total),
+        )
+    }
+}
+
 pub struct Updater {
     pub state: State,
     /// The user closed the prompt for this session.
@@ -80,6 +117,8 @@ pub struct Updater {
     last_check: Option<Instant>,
     /// Where this program lives, recorded before any update replaces it.
     exe: Option<PathBuf>,
+    /// The install under way, or the last one.
+    progress: Arc<Progress>,
     tx: Sender<Message>,
     rx: Receiver<Message>,
     ctx: egui::Context,
@@ -99,6 +138,7 @@ impl Updater {
             manual: false,
             last_check: None,
             exe,
+            progress: Arc::default(),
             tx,
             rx,
             ctx: ctx.clone(),
@@ -154,15 +194,26 @@ impl Updater {
         };
         self.dismissed = false;
         self.state = State::Installing(release.clone());
+        let progress = Arc::new(Progress::default());
+        self.progress = Arc::clone(&progress);
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         std::thread::spawn(move || {
-            let _ = tx.send(Message::Installed(install(&release, &exe)));
+            let _ = tx.send(Message::Installed(install(&release, &exe, &progress)));
             ctx.request_repaint();
         });
     }
 
+    /// What the install under way is doing, such as how much is downloaded.
+    pub fn install_status(&self) -> String {
+        self.progress.describe()
+    }
+
     /// Applies results from the background thread.
     pub fn poll(&mut self) {
+        if matches!(self.state, State::Installing(_)) {
+            // Keeps the download's progress moving on screen.
+            self.ctx.request_repaint_after(Duration::from_millis(250));
+        }
         while let Ok(message) = self.rx.try_recv() {
             match message {
                 Message::Checked(result) => {
@@ -218,13 +269,26 @@ fn is_newer(candidate: &str, current: &str) -> bool {
     }
 }
 
-fn agent() -> ureq::Agent {
+/// For asking GitHub about releases: small replies, so one overall limit.
+fn check_config() -> ureq::config::Config {
     ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(120)))
-        .timeout_connect(Some(Duration::from_secs(15)))
+        .timeout_global(Some(CHECK_TIMEOUT))
+        .timeout_connect(Some(CONNECT_TIMEOUT))
         .user_agent(concat!("feather/", env!("CARGO_PKG_VERSION")))
         .build()
-        .into()
+}
+
+/// For downloads. A slow connection still gets there, so there is no overall
+/// limit short of [`DOWNLOAD_LIMIT`]; a download fails once nothing has
+/// arrived for [`STALL_TIMEOUT`].
+fn download_config() -> ureq::config::Config {
+    ureq::Agent::config_builder()
+        .timeout_connect(Some(CONNECT_TIMEOUT))
+        .timeout_recv_response(Some(RESPONSE_TIMEOUT))
+        .timeout_per_read(Some(STALL_TIMEOUT))
+        .timeout_global(Some(DOWNLOAD_LIMIT))
+        .user_agent(concat!("feather/", env!("CARGO_PKG_VERSION")))
+        .build()
 }
 
 fn api_url() -> String {
@@ -246,7 +310,7 @@ fn current_version() -> String {
 
 /// The latest release, if it is newer than this build.
 fn latest_release() -> Result<Option<Release>, String> {
-    let body = agent()
+    let body = ureq::Agent::new_with_config(check_config())
         .get(&api_url())
         .header("Accept", "application/vnd.github+json")
         .call()
@@ -264,7 +328,11 @@ fn network_error(error: &ureq::Error) -> String {
             "GitHub is limiting requests from this network. Try again later.".to_owned()
         }
         ureq::Error::StatusCode(code) => format!("GitHub answered with an error ({code})."),
-        _ => "Could not reach GitHub. Check your internet connection.".to_owned(),
+        ureq::Error::Timeout(_) => {
+            "GitHub took too long to answer. Check your internet connection and try again."
+                .to_owned()
+        }
+        _ => format!("Could not reach GitHub ({error}). Check your internet connection."),
     }
 }
 
@@ -294,19 +362,111 @@ fn parse_release(json: &str, current: &str) -> Result<Option<Release>, String> {
 
 // ── Installing ─────────────────────────────────────────────────────────────
 
-fn download(url: &str) -> Result<Vec<u8>, String> {
-    let mut response = agent().get(url).call().map_err(|e| network_error(&e))?;
+/// Downloads `url`, counting what arrives in `progress` if given.
+fn download(url: &str, progress: Option<&Progress>) -> Result<Vec<u8>, String> {
+    download_with(download_config(), url, progress)
+}
+
+fn download_with(
+    config: ureq::config::Config,
+    url: &str,
+    progress: Option<&Progress>,
+) -> Result<Vec<u8>, String> {
+    let mut response = ureq::Agent::new_with_config(config)
+        .get(url)
+        .call()
+        .map_err(|e| network_error(&e))?;
+    let total = response.body().content_length();
+    if total.is_some_and(|total| total > MAX_DOWNLOAD_BYTES) {
+        return Err(TOO_LARGE.to_owned());
+    }
+    let fallback = Progress::default();
+    let progress = progress.unwrap_or(&fallback);
+    progress.received.store(0, Ordering::Relaxed);
+    progress.total.store(total.unwrap_or(0), Ordering::Relaxed);
+    read_body(response.body_mut().as_reader(), progress)
+}
+
+const TOO_LARGE: &str = "The download was larger than expected.";
+
+/// Reads a whole download, keeping `progress` up to date.
+fn read_body(mut reader: impl Read, progress: &Progress) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
-    response
-        .body_mut()
-        .as_reader()
-        .take(MAX_DOWNLOAD_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "The download was interrupted.".to_owned())?;
-    if bytes.len() as u64 > MAX_DOWNLOAD_BYTES {
-        return Err("The download was larger than expected.".to_owned());
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        let read = match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => {
+                let total = progress.total.load(Ordering::Relaxed);
+                return Err(read_error(
+                    &e,
+                    bytes.len() as u64,
+                    (total > 0).then_some(total),
+                ));
+            }
+        };
+        bytes.extend_from_slice(&buffer[..read]);
+        if bytes.len() as u64 > MAX_DOWNLOAD_BYTES {
+            return Err(TOO_LARGE.to_owned());
+        }
+        progress
+            .received
+            .store(bytes.len() as u64, Ordering::Relaxed);
     }
     Ok(bytes)
+}
+
+/// Explains a download that failed partway, saying how far it got.
+fn read_error(error: &std::io::Error, received: u64, total: Option<u64>) -> String {
+    let timeout = error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<ureq::Error>())
+        .and_then(|inner| match inner {
+            ureq::Error::Timeout(timeout) => Some(*timeout),
+            _ => None,
+        });
+    let got = amount(received, total);
+    let advice = "Try again, or download it from the website.";
+    match timeout {
+        Some(ureq::Timeout::PerRead) => format!(
+            "The download stalled: nothing arrived from GitHub for {} seconds, after {got}. {advice}",
+            STALL_TIMEOUT.as_secs()
+        ),
+        Some(_) => format!(
+            "The download took longer than {} minutes and was stopped after {got}. {advice}",
+            DOWNLOAD_LIMIT.as_secs() / 60
+        ),
+        None if error.kind() == std::io::ErrorKind::TimedOut => {
+            format!("The download stalled after {got}. {advice}")
+        }
+        None => format!("The download was interrupted after {got} ({error}). {advice}"),
+    }
+}
+
+/// "3.2 of 16.7 MB", or just "3.2 MB" when the size isn't known.
+fn amount(received: u64, total: Option<u64>) -> String {
+    let mb = |bytes: u64| format!("{:.1}", bytes as f64 / 1_000_000.0);
+    match total {
+        Some(total) => format!("{} of {} MB", mb(received), mb(total)),
+        None => format!("{} MB", mb(received)),
+    }
+}
+
+/// Describes a download in progress for the update card and settings.
+fn describe_download(received: u64, total: Option<u64>) -> String {
+    match total {
+        None if received == 0 => "Starting the download.".to_owned(),
+        Some(total) => {
+            let percent = (received.min(total) * 100) / total;
+            format!(
+                "Downloading: {} ({percent}%).",
+                amount(received, Some(total))
+            )
+        }
+        None => format!("Downloading: {}.", amount(received, None)),
+    }
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -324,19 +484,20 @@ fn expected_checksum<'a>(list: &'a str, name: &str) -> Option<&'a str> {
     })
 }
 
-fn install(release: &Release, exe: &Path) -> Result<(), String> {
+fn install(release: &Release, exe: &Path, progress: &Progress) -> Result<(), String> {
     let (Some(name), Some(asset_url), Some(sums_url)) =
         (ASSET, &release.asset_url, &release.checksums_url)
     else {
         return Err("This release has no download for this computer.".to_owned());
     };
 
-    let sums = String::from_utf8(download(sums_url)?)
+    let sums = String::from_utf8(download(sums_url, None)?)
         .map_err(|_| "The checksum list was unreadable.".to_owned())?;
     let expected = expected_checksum(&sums, name)
         .ok_or("The release does not list a checksum for this download.")?
         .to_ascii_lowercase();
-    let bytes = download(asset_url)?;
+    let bytes = download(asset_url, Some(progress))?;
+    progress.installing.store(true, Ordering::Relaxed);
     if sha256_hex(&bytes) != expected {
         return Err("The download did not match its checksum, so it was not installed.".to_owned());
     }
@@ -514,5 +675,156 @@ mod tests {
             sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    #[test]
+    fn downloads_only_give_up_when_they_stall() {
+        // 0.6.1 gave the whole download two minutes, so a 16 MB program over
+        // a slow link to GitHub never arrived.
+        let download = download_config();
+        assert_eq!(download.timeout_per_read(), Some(STALL_TIMEOUT));
+        assert_eq!(download.timeouts().global, Some(DOWNLOAD_LIMIT));
+        assert!(download.timeouts().recv_body.is_none());
+        assert!(DOWNLOAD_LIMIT >= Duration::from_secs(30 * 60));
+        // 17 MB within the limit needs only about 10 KB/s.
+        assert!(17_000_000 / DOWNLOAD_LIMIT.as_secs() < 10_000);
+        assert_eq!(check_config().timeouts().global, Some(CHECK_TIMEOUT));
+    }
+
+    /// Serves one request on a local port: the headers, then `body` a piece
+    /// at a time with `pause` before each piece, then `hang` with the
+    /// connection open.
+    fn serve(length: usize, pieces: Vec<&'static [u8]>, pause: Duration, hang: Duration) -> String {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/feather", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK
+Content-Length: {length}
+Connection: close
+
+"
+            );
+            for piece in pieces {
+                std::thread::sleep(pause);
+                let _ = stream.write_all(piece);
+                let _ = stream.flush();
+            }
+            std::thread::sleep(hang);
+        });
+        url
+    }
+
+    fn quick_config(stall: Duration) -> ureq::config::Config {
+        ureq::Agent::config_builder()
+            .timeout_connect(Some(Duration::from_secs(5)))
+            .timeout_recv_response(Some(Duration::from_secs(5)))
+            .timeout_per_read(Some(stall))
+            .build()
+    }
+
+    #[test]
+    fn a_slow_download_finishes_and_reports_progress() {
+        // Every piece arrives within the stall limit, though the whole takes
+        // several times longer than it.
+        let pieces: Vec<&'static [u8]> = vec![b"fe", b"at", b"he", b"r!"];
+        let url = serve(8, pieces, Duration::from_millis(150), Duration::ZERO);
+        let progress = Progress::default();
+        let bytes = download_with(
+            quick_config(Duration::from_millis(400)),
+            &url,
+            Some(&progress),
+        )
+        .expect("a slow but steady download completes");
+        assert_eq!(bytes, b"feather!");
+        assert_eq!(progress.received.load(Ordering::Relaxed), 8);
+        assert_eq!(progress.total.load(Ordering::Relaxed), 8);
+    }
+
+    #[test]
+    fn a_stalled_download_fails_with_a_clear_error() {
+        let url = serve(
+            1_000_000,
+            vec![b"partial"],
+            Duration::ZERO,
+            Duration::from_secs(3),
+        );
+        let progress = Progress::default();
+        let started = Instant::now();
+        let error = download_with(
+            quick_config(Duration::from_millis(300)),
+            &url,
+            Some(&progress),
+        )
+        .expect_err("a download that stops arriving fails");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "gave up promptly"
+        );
+        assert!(error.contains("stalled"), "{error}");
+        assert!(error.contains("of 1.0 MB"), "{error}");
+        assert!(error.contains("download it from the website"), "{error}");
+        assert_eq!(progress.received.load(Ordering::Relaxed), 7);
+    }
+
+    #[test]
+    fn a_download_cut_short_says_so() {
+        // The server closes the connection with most of the body missing.
+        let url = serve(100, vec![b"short"], Duration::ZERO, Duration::ZERO);
+        let error = download_with(quick_config(Duration::from_secs(2)), &url, None)
+            .expect_err("a truncated download fails");
+        assert!(error.starts_with("The download was interrupted"), "{error}");
+    }
+
+    #[test]
+    fn explains_why_a_download_failed() {
+        let stalled = std::io::Error::other(ureq::Error::Timeout(ureq::Timeout::PerRead));
+        let message = read_error(&stalled, 4_200_000, Some(16_659_968));
+        assert!(
+            message.starts_with(
+                "The download stalled: nothing arrived from GitHub for 30 seconds, after 4.2 of 16.7 MB."
+            ),
+            "{message}"
+        );
+        let too_long = std::io::Error::other(ureq::Error::Timeout(ureq::Timeout::Global));
+        assert!(read_error(&too_long, 0, None).contains("took longer than 60 minutes"));
+        let reset = std::io::Error::from(std::io::ErrorKind::ConnectionReset);
+        assert!(
+            read_error(&reset, 1_000_000, None)
+                .starts_with("The download was interrupted after 1.0 MB (")
+        );
+        assert!(network_error(&ureq::Error::Timeout(ureq::Timeout::Connect)).contains("too long"));
+    }
+
+    #[test]
+    fn describes_progress() {
+        assert_eq!(describe_download(0, None), "Starting the download.");
+        assert_eq!(
+            describe_download(4_200_000, Some(16_659_968)),
+            "Downloading: 4.2 of 16.7 MB (25%)."
+        );
+        assert_eq!(describe_download(1_500_000, None), "Downloading: 1.5 MB.");
+        let progress = Progress::default();
+        progress.total.store(10, Ordering::Relaxed);
+        progress.received.store(10, Ordering::Relaxed);
+        assert_eq!(progress.describe(), "Downloading: 0.0 of 0.0 MB (100%).");
+        progress.installing.store(true, Ordering::Relaxed);
+        assert_eq!(
+            progress.describe(),
+            "Checking and installing the new version."
+        );
+    }
+
+    #[test]
+    fn read_body_counts_bytes() {
+        let progress = Progress::default();
+        let body = vec![7u8; 200_000];
+        assert_eq!(read_body(&body[..], &progress).unwrap(), body);
+        assert_eq!(progress.received.load(Ordering::Relaxed), 200_000);
     }
 }
