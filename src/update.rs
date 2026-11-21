@@ -27,15 +27,14 @@ const RECHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 const MAX_DOWNLOAD_BYTES: u64 = 200 * 1024 * 1024;
 /// Asking GitHub about the latest release is one small reply.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(60);
-/// Setting up a connection, and then waiting for GitHub to start answering.
+/// Each step of starting a download: looking up GitHub's address, connecting,
+/// sending the request, and then waiting for GitHub to start answering.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 /// A download takes as long as the connection needs (the program is over
 /// 16 MB, and GitHub's downloads can run at a few dozen KB/s), but gives up
 /// once nothing at all has arrived for this long.
 const STALL_TIMEOUT: Duration = Duration::from_secs(30);
-/// Bounds a download that never quite stalls but never finishes either.
-const DOWNLOAD_LIMIT: Duration = Duration::from_secs(60 * 60);
 
 /// The release file for this kind of computer, if we publish one.
 const ASSET: Option<&str> = if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
@@ -278,15 +277,17 @@ fn check_config() -> ureq::config::Config {
         .build()
 }
 
-/// For downloads. A slow connection still gets there, so there is no overall
-/// limit short of [`DOWNLOAD_LIMIT`]; a download fails once nothing has
-/// arrived for [`STALL_TIMEOUT`].
+/// For downloads. A slow connection still gets there, so nothing limits a
+/// whole download; it fails once nothing has arrived for [`STALL_TIMEOUT`].
+/// Every step before the body has a short limit of its own, since the stall
+/// limit only covers reading.
 fn download_config() -> ureq::config::Config {
     ureq::Agent::config_builder()
+        .timeout_resolve(Some(CONNECT_TIMEOUT))
         .timeout_connect(Some(CONNECT_TIMEOUT))
+        .timeout_send_request(Some(CONNECT_TIMEOUT))
         .timeout_recv_response(Some(RESPONSE_TIMEOUT))
         .timeout_per_read(Some(STALL_TIMEOUT))
-        .timeout_global(Some(DOWNLOAD_LIMIT))
         .user_agent(concat!("feather/", env!("CARGO_PKG_VERSION")))
         .build()
 }
@@ -434,10 +435,7 @@ fn read_error(error: &std::io::Error, received: u64, total: Option<u64>) -> Stri
             "The download stalled: nothing arrived from GitHub for {} seconds, after {got}. {advice}",
             STALL_TIMEOUT.as_secs()
         ),
-        Some(_) => format!(
-            "The download took longer than {} minutes and was stopped after {got}. {advice}",
-            DOWNLOAD_LIMIT.as_secs() / 60
-        ),
+        Some(timeout) => format!("The download timed out ({timeout}) after {got}. {advice}"),
         None if error.kind() == std::io::ErrorKind::TimedOut => {
             format!("The download stalled after {got}. {advice}")
         }
@@ -682,19 +680,31 @@ mod tests {
         // 0.6.1 gave the whole download two minutes, so a 16 MB program over
         // a slow link to GitHub never arrived.
         let download = download_config();
+        let timeouts = download.timeouts();
         assert_eq!(download.timeout_per_read(), Some(STALL_TIMEOUT));
-        assert_eq!(download.timeouts().global, Some(DOWNLOAD_LIMIT));
-        assert!(download.timeouts().recv_body.is_none());
-        assert!(DOWNLOAD_LIMIT >= Duration::from_secs(30 * 60));
-        // 17 MB within the limit needs only about 10 KB/s.
-        assert!(17_000_000 / DOWNLOAD_LIMIT.as_secs() < 10_000);
+        // Nothing limits the whole download, so however slowly it arrives,
+        // it finishes as long as it keeps arriving.
+        assert!(timeouts.global.is_none());
+        assert!(timeouts.per_call.is_none());
+        assert!(timeouts.recv_body.is_none());
+        // Every step before the body has a short limit of its own, since the
+        // stall limit only covers reading.
+        assert_eq!(timeouts.resolve, Some(CONNECT_TIMEOUT));
+        assert_eq!(timeouts.connect, Some(CONNECT_TIMEOUT));
+        assert_eq!(timeouts.send_request, Some(CONNECT_TIMEOUT));
+        assert_eq!(timeouts.recv_response, Some(RESPONSE_TIMEOUT));
         assert_eq!(check_config().timeouts().global, Some(CHECK_TIMEOUT));
     }
 
-    /// Serves one request on a local port: the headers, then `body` a piece
-    /// at a time with `pause` before each piece, then `hang` with the
-    /// connection open.
-    fn serve(length: usize, pieces: Vec<&'static [u8]>, pause: Duration, hang: Duration) -> String {
+    /// Serves one request on a local port: the headers, then each of
+    /// `pieces` after `pause`. The connection then stays open until `done`
+    /// says so (or is dropped), or closes at once without one.
+    fn serve(
+        length: usize,
+        pieces: Vec<&'static [u8]>,
+        pause: Duration,
+        done: Option<mpsc::Receiver<()>>,
+    ) -> String {
         use std::io::Write;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/feather", listener.local_addr().unwrap());
@@ -704,24 +714,27 @@ mod tests {
             let _ = stream.read(&mut request);
             let _ = write!(
                 stream,
-                "HTTP/1.1 200 OK
-Content-Length: {length}
-Connection: close
-
-"
+                "HTTP/1.1 200 OK\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n"
             );
             for piece in pieces {
                 std::thread::sleep(pause);
                 let _ = stream.write_all(piece);
                 let _ = stream.flush();
             }
-            std::thread::sleep(hang);
+            if let Some(done) = done {
+                // Bounded, so a client that never gives up fails the test
+                // rather than hanging it.
+                let _ = done.recv_timeout(Duration::from_secs(20));
+            }
         });
         url
     }
 
+    /// The download settings with short limits, and no proxy: the tests talk
+    /// to this computer, whatever the environment says.
     fn quick_config(stall: Duration) -> ureq::config::Config {
         ureq::Agent::config_builder()
+            .proxy(None)
             .timeout_connect(Some(Duration::from_secs(5)))
             .timeout_recv_response(Some(Duration::from_secs(5)))
             .timeout_per_read(Some(stall))
@@ -730,42 +743,35 @@ Connection: close
 
     #[test]
     fn a_slow_download_finishes_and_reports_progress() {
-        // Every piece arrives within the stall limit, though the whole takes
-        // several times longer than it.
-        let pieces: Vec<&'static [u8]> = vec![b"fe", b"at", b"he", b"r!"];
-        let url = serve(8, pieces, Duration::from_millis(150), Duration::ZERO);
+        // Each piece arrives well within the stall limit, though the whole
+        // takes about twice as long as it.
+        let pieces: Vec<&'static [u8]> = vec![b"fe", b"at", b"he", b"r!", b"!!"];
+        let url = serve(10, pieces, Duration::from_millis(400), None);
         let progress = Progress::default();
-        let bytes = download_with(
-            quick_config(Duration::from_millis(400)),
-            &url,
-            Some(&progress),
-        )
-        .expect("a slow but steady download completes");
-        assert_eq!(bytes, b"feather!");
-        assert_eq!(progress.received.load(Ordering::Relaxed), 8);
-        assert_eq!(progress.total.load(Ordering::Relaxed), 8);
+        let bytes = download_with(quick_config(Duration::from_secs(1)), &url, Some(&progress))
+            .expect("a slow but steady download completes");
+        assert_eq!(bytes, b"feather!!!");
+        assert_eq!(progress.received.load(Ordering::Relaxed), 10);
+        assert_eq!(progress.total.load(Ordering::Relaxed), 10);
     }
 
     #[test]
     fn a_stalled_download_fails_with_a_clear_error() {
+        let (done, until_done) = mpsc::channel();
         let url = serve(
             1_000_000,
             vec![b"partial"],
             Duration::ZERO,
-            Duration::from_secs(3),
+            Some(until_done),
         );
         let progress = Progress::default();
-        let started = Instant::now();
         let error = download_with(
             quick_config(Duration::from_millis(300)),
             &url,
             Some(&progress),
         )
         .expect_err("a download that stops arriving fails");
-        assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "gave up promptly"
-        );
+        let _ = done.send(());
         assert!(error.contains("stalled"), "{error}");
         assert!(error.contains("of 1.0 MB"), "{error}");
         assert!(error.contains("download it from the website"), "{error}");
@@ -775,7 +781,7 @@ Connection: close
     #[test]
     fn a_download_cut_short_says_so() {
         // The server closes the connection with most of the body missing.
-        let url = serve(100, vec![b"short"], Duration::ZERO, Duration::ZERO);
+        let url = serve(100, vec![b"short"], Duration::ZERO, None);
         let error = download_with(quick_config(Duration::from_secs(2)), &url, None)
             .expect_err("a truncated download fails");
         assert!(error.starts_with("The download was interrupted"), "{error}");
@@ -791,8 +797,11 @@ Connection: close
             ),
             "{message}"
         );
-        let too_long = std::io::Error::other(ureq::Error::Timeout(ureq::Timeout::Global));
-        assert!(read_error(&too_long, 0, None).contains("took longer than 60 minutes"));
+        let timed_out = std::io::Error::other(ureq::Error::Timeout(ureq::Timeout::RecvBody));
+        assert!(
+            read_error(&timed_out, 0, None)
+                .starts_with("The download timed out (receive body) after 0.0 MB.")
+        );
         let reset = std::io::Error::from(std::io::ErrorKind::ConnectionReset);
         assert!(
             read_error(&reset, 1_000_000, None)
