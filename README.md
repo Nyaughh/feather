@@ -89,6 +89,8 @@ Putting the command on your `PATH`:
 - **Windows**: the installer does it (the *Add the "feather" command to PATH*
   option, on by default). Open a new terminal afterwards. It works in
   PowerShell, Command Prompt and Git Bash, and the uninstaller removes it.
+  The command is `bin\feather.exe`, a small console program (built from
+  `src/bin/feather-launcher.rs`) that runs Feather with the same arguments.
 - **macOS**: in Feather, open Settings > Command line > **Install**. This links
   `/usr/local/bin/feather` to the app, asking for your password if that folder
   needs it.

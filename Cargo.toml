@@ -3,6 +3,9 @@ name = "feather"
 version = "0.6.1"
 edition = "2024"
 description = "A fast, minimal repository viewer and git client"
+# src/bin/feather-launcher.rs is the Windows `feather` command; `cargo run`
+# means the app.
+default-run = "feather"
 
 [dependencies]
 eframe = { version = "0.37", default-features = false, features = ["glow", "x11", "wayland", "persistence", "default_fonts", "clipboard", "links"] }

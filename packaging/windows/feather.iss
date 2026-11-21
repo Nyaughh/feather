@@ -1,6 +1,7 @@
 ; The Windows installer, built with Inno Setup:
 ;   ISCC.exe /DAppVersion=0.2.1 packaging\windows\feather.iss
-; Expects the release build at target\release\feather.exe.
+; Expects the release build at target\release\feather.exe (and the
+; feather-launcher.exe built beside it).
 ;
 ; It installs for the current user only (no administrator prompt), into
 ; %LOCALAPPDATA%\Programs\Feather. That folder is writable without elevation,
@@ -56,10 +57,10 @@ Name: "contextmenu"; Description: "Add ""Open with Feather"" to the right-click 
 
 [Files]
 Source: "..\..\target\release\feather.exe"; DestDir: "{app}"; Flags: ignoreversion
-; The feather command: bin\feather.cmd for Command Prompt and PowerShell,
-; bin\feather for Git Bash. Only this folder goes on PATH, not {app} itself.
-Source: "bin\feather.cmd"; DestDir: "{app}\bin"; Flags: ignoreversion
-Source: "bin\feather"; DestDir: "{app}\bin"; Flags: ignoreversion
+; The feather command for every terminal: a small console program that runs
+; {app}\feather.exe with the same arguments (see src/bin/feather-launcher.rs).
+; Only this folder goes on PATH, not {app} itself.
+Source: "..\..\target\release\feather-launcher.exe"; DestDir: "{app}\bin"; DestName: "feather.exe"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\Feather"; Filename: "{app}\feather.exe"

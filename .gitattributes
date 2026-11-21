@@ -1,4 +1,0 @@
-# The Windows `feather` commands: the shell script breaks with CRLF line
-# endings, and cmd.exe expects them.
-packaging/windows/bin/feather text eol=lf
-packaging/windows/bin/feather.cmd text eol=crlf

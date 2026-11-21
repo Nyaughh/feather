@@ -38,7 +38,7 @@ pub struct Options {
     pub window: WindowChoice,
     /// Run the window in this process rather than in the background.
     pub wait: bool,
-    /// Run as the `feather` shell command (the Windows wrappers say so with
+    /// Run as the `feather` shell command (the Windows launcher says so with
     /// a hidden `--from-shell`), even with no terminal in sight.
     pub from_shell: bool,
 }
@@ -245,7 +245,7 @@ fn ends_with_separator(arg: &OsStr) -> bool {
 
 /// Whether a terminal (or a script) ran us, as opposed to a desktop shortcut
 /// or the file manager. The installed commands say so outright (the
-/// `--from-shell` of the Windows wrappers, and the symlink on macOS and
+/// `--from-shell` of the Windows launcher, and the symlink on macOS and
 /// Linux), so a script with every stream redirected counts too.
 pub fn from_terminal() -> bool {
     #[cfg(unix)]
