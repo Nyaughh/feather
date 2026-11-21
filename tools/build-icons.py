@@ -6,8 +6,8 @@ The source is assets/brand/feather-black.svg (the designer's mark, traced),
 plus assets/brand/og-base.png for the social card. The colours and the tile
 shape are the ones in README.md, under "Brand". This writes the white mark and
 the tile SVGs next to the black one, the app icons in assets/ and the site
-icons and social card in site/. Run it from the repository root after changing the mark or the
-brand colours, and commit what it writes.
+icons and social card in site/. Run it from the repository root after changing
+the mark or the brand colours, and commit what it writes.
 """
 
 import io
@@ -18,8 +18,13 @@ from pathlib import Path
 import resvg_py
 from PIL import Image
 
-GOLD = '#FFC53D'  # the tile
-INK = '#09090A'  # the mark on the tile; also the app's dark shell
+# Golden-hour blush: cream warming to a soft rose-peach, from the feather's
+# quill (bottom left) to its tip (top right).
+TILE_STOPS = ((0, '#FAF5EF'), (0.5, '#F6E2D6'), (1, '#EFC3AE'))
+MARK_COLOUR = '#35261F'  # deep warm brown
+# A thin warm edge, so the pale tile keeps its outline on a white taskbar.
+EDGE, EDGE_OPACITY = '#5E3A2A', 0.24
+SHADOW = '#3A2414'  # the macOS tile's drop shadow
 
 MARK = Path('assets/brand/feather-black.svg').read_text()
 VIEW_W, VIEW_H = (float(v) for v in re.search(r'viewBox="0 0 ([\d.]+) ([\d.]+)"', MARK).groups())
@@ -39,24 +44,39 @@ def mark(cx, cy, height, colour):
     return f'<path transform="translate({x:.2f} {y:.2f}) scale({scale:.5f})" fill="{colour}" d="{PATH}"/>'
 
 
-def tile_svg(size=1024, inset=0.03125, radius=0.225, mark_height=0.64, shadow=False):
-    """A rounded gold square with the ink mark. All lengths are fractions of `size`."""
+def tile_svg(size=1024, inset=0.03125, radius=0.225, mark_height=0.64, edge=0.012, shadow=False):
+    """The blush tile with the mark. All lengths are fractions of `size`."""
     side = size * (1 - 2 * inset)
     at = size * inset
     rx = side * radius
-    defs, filt = '', ''
+    stops = ''.join(f'<stop offset="{o:g}" stop-color="{c}"/>' for o, c in TILE_STOPS)
+    defs = (
+        f'<linearGradient id="g" gradientUnits="userSpaceOnUse" x1="{at + side * 0.15:g}" y1="{at + side * 0.95:g}" '
+        f'x2="{at + side * 0.9:g}" y2="{at + side * 0.05:g}">{stops}</linearGradient>'
+    )
+    filt = ''
     if shadow:
-        defs = (
-            '<defs><filter id="s" x="-20%" y="-20%" width="140%" height="140%">'
+        defs += (
+            '<filter id="s" x="-20%" y="-20%" width="140%" height="140%">'
             f'<feDropShadow dx="0" dy="{size * 0.012:.1f}" stdDeviation="{size * 0.014:.1f}" '
-            'flood-color="#000" flood-opacity=".3"/></filter></defs>'
+            f'flood-color="{SHADOW}" flood-opacity=".28"/></filter>'
         )
         filt = ' filter="url(#s)"'
+    outline = ''
+    if edge:
+        w = size * edge
+        outline = (
+            f'  <rect x="{at + w / 2:g}" y="{at + w / 2:g}" width="{side - w:g}" height="{side - w:g}" '
+            f'rx="{max(rx - w / 2, 0):.1f}" fill="none" stroke="{EDGE}" stroke-opacity="{EDGE_OPACITY}" '
+            f'stroke-width="{w:g}"/>\n'
+        )
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {size} {size}">\n'
         f'  <title>Feather</title>\n'
-        f'  {defs}<rect x="{at:g}" y="{at:g}" width="{side:g}" height="{side:g}" rx="{rx:.1f}" fill="{GOLD}"{filt}/>\n'
-        f'  {mark(size / 2, size / 2, size * mark_height, INK)}\n'
+        f'  <defs>{defs}</defs>\n'
+        f'  <rect x="{at:g}" y="{at:g}" width="{side:g}" height="{side:g}" rx="{rx:.1f}" fill="url(#g)"{filt}/>\n'
+        f'{outline}'
+        f'  {mark(size / 2, size / 2, size * mark_height, MARK_COLOUR)}\n'
         f'</svg>\n'
     )
 
@@ -68,9 +88,10 @@ def render(svg, px):
 
 # The tile at three sizes. Small icons get the whole square and a bigger mark
 # so the feather still reads in a taskbar or a browser tab.
+# The edge is thicker at small sizes, where a hairline would disappear.
 LARGE = dict()  # 64 px and up
-MEDIUM = dict(inset=0, radius=0.22, mark_height=0.72)  # 25 to 48 px
-SMALL = dict(inset=0, radius=0.2, mark_height=0.8)  # 24 px and under
+MEDIUM = dict(inset=0, radius=0.22, mark_height=0.72, edge=0.028)  # 25 to 48 px
+SMALL = dict(inset=0, radius=0.2, mark_height=0.8, edge=0.05)  # 24 px and under
 
 
 def app_icon(px):
@@ -167,7 +188,7 @@ def main():
     save_png(app_icon(64), 'site/favicon.png')
     save_png(app_icon(512), 'site/icon.png')
     # iOS rounds the corners itself and wants no transparency.
-    save_png(render(tile_svg(inset=0, radius=0, mark_height=0.62), 180).convert('RGB'), 'site/apple-touch-icon.png')
+    save_png(render(tile_svg(inset=0, radius=0, mark_height=0.62, edge=0), 180).convert('RGB'), 'site/apple-touch-icon.png')
     og_image()
 
 

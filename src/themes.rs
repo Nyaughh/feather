@@ -48,7 +48,7 @@ fn saturation(c: Color32) -> f32 {
     }
 }
 
-fn contrast(a: Color32, b: Color32) -> f32 {
+pub fn contrast(a: Color32, b: Color32) -> f32 {
     let (la, lb) = (luminance(a), luminance(b));
     (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
 }
@@ -155,9 +155,10 @@ pub const FEATHER_DARK: Palette = Palette {
     text_secondary: rgb(0x9a9da5),
     text_muted: rgb(0x62666d),
     text_faint: rgb(0x45484e),
-    accent: rgb(0x5e6ad2),
-    accent_hover: rgb(0x6c78e6),
-    link: rgb(0x828fff),
+    // The brand's golden-hour blush (see README, "Brand").
+    accent: rgb(0xefbfa8),
+    accent_hover: rgb(0xf1c8b4),
+    link: rgb(0xedb096),
     green: rgb(0x4cb782),
     red: rgb(0xeb5757),
     yellow: rgb(0xe2b94a),
@@ -191,9 +192,11 @@ pub const FEATHER_LIGHT: Palette = Palette {
     text_secondary: rgb(0x55585f),
     text_muted: rgb(0x858890),
     text_faint: rgb(0xb3b6bd),
-    accent: rgb(0x5e6ad2),
-    accent_hover: rgb(0x4f5bc4),
-    link: rgb(0x4a56c9),
+    // The blush is too pale for white, so light mode uses the terracotta it
+    // deepens to.
+    accent: rgb(0xa9563f),
+    accent_hover: rgb(0x914a36),
+    link: rgb(0xa04f3a),
     green: rgb(0x23915b),
     red: rgb(0xd13b3b),
     yellow: rgb(0xa9790a),
@@ -423,7 +426,13 @@ pub fn presets() -> &'static [Preset] {
                 id: "midnight",
                 name: "Midnight",
                 dark: MIDNIGHT.palette(),
-                light: FEATHER_LIGHT,
+                // Feather's light half, but keeping Midnight's indigo accent.
+                light: Palette {
+                    accent: rgb(0x5e6ad2),
+                    accent_hover: rgb(0x4f5bc4),
+                    link: rgb(0x4a56c9),
+                    ..FEATHER_LIGHT
+                },
             },
             pair(
                 "catppuccin",

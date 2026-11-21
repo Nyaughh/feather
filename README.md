@@ -204,13 +204,17 @@ build fills a square icon.
 | | |
 |---|---|
 | **Mark** | `assets/brand/feather-black.svg` and `feather-white.svg`, the one-colour versions for anything that isn't the icon |
-| **Gold** `#FFC53D` | The brand colour: the icon tile, and the accent on the website. Warm and light, like the name, and set against the app's own accent rather than copying it |
-| **Ink** `#09090A` | The mark on the tile, and the app's dark shell |
-| **Tile** | Gold rounded square, ink mark. Corner radius 22.5% of the tile, mark about 64% of the canvas height. Below 64 px the tile fills the square and the mark grows to 72-80% so it stays legible. macOS uses Apple's grid (an 824 px tile on 1024) with a soft shadow |
+| **Blush** `#FAF5EF` → `#EFC3AE` | Golden-hour blush, the brand colour: a cream tile warming to a soft rose-peach from the quill to the tip, like a feather in low sun |
+| **Brown** `#35261F` | The mark on the tile |
+| **Tile** | The blush gradient in a rounded square, with a thin warm edge (`#5E3A2A` at 24%) so it keeps its outline on white. Corner radius 22.5% of the tile, mark about 64% of the canvas height. Below 64 px the tile fills the square, the mark grows to 72-80% and the edge thickens, so it stays legible. macOS uses Apple's grid (an 824 px tile on 1024) with a soft warm shadow |
+| **Accent** `#EFBFA8` | The blush as a single colour: the website's accent (with `#2A1E19` text) and the app's default accent in dark mode. Light mode uses `#A9563F`, the terracotta it deepens to, because the blush is too pale to stand out on white |
 
-The app keeps its own accent colours (indigo by default, or whatever the user
-picks); the gold is for the icon and the website. Don't recolour the mark,
-add outlines or effects, or rotate it.
+The app's default accent is the brand's: Feather's own theme uses the blush,
+and Settings > Accent colour offers it alongside Monochrome, Deep blue, Teal,
+Soft violet, Indigo, Orange and Pink. Each preset has a dark and a light shade
+chosen so that it stands out from the panels (3:1 or better) and the text on
+it reads (4.5:1 or better); a test checks both. Don't recolour the mark, add
+outlines or effects, or rotate it.
 
 Every icon is generated from the black mark. After changing it or the colours,
 run `pip install pillow resvg-py` once, then `python tools/build-icons.py`, and

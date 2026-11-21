@@ -12,24 +12,34 @@ pub enum ThemeChoice {
     Light,
 }
 
+/// The accent colour. The variants are saved by name, so existing ones keep
+/// their names even where the label shown changed (Blue is "Deep blue", Green
+/// is "Teal").
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Accent {
-    /// Whatever accent the chosen theme comes with.
+    /// Whatever accent the chosen theme comes with. For Feather's own theme
+    /// that is the brand's golden-hour blush.
     #[default]
     Theme,
-    Indigo,
+    Blush,
+    Mono,
     Blue,
     Green,
+    Violet,
+    Indigo,
     Orange,
     Pink,
 }
 
 impl Accent {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 9] = [
         Self::Theme,
-        Self::Indigo,
+        Self::Blush,
+        Self::Mono,
         Self::Blue,
         Self::Green,
+        Self::Violet,
+        Self::Indigo,
         Self::Orange,
         Self::Pink,
     ];
@@ -37,9 +47,12 @@ impl Accent {
     pub fn name(self) -> &'static str {
         match self {
             Self::Theme => "The theme's own",
+            Self::Blush => "Golden-hour blush",
+            Self::Mono => "Monochrome",
+            Self::Blue => "Deep blue",
+            Self::Green => "Teal",
+            Self::Violet => "Soft violet",
             Self::Indigo => "Indigo",
-            Self::Blue => "Blue",
-            Self::Green => "Green",
             Self::Orange => "Orange",
             Self::Pink => "Pink",
         }

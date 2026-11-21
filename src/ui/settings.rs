@@ -97,14 +97,7 @@ fn body(ui: &mut Ui, settings: &mut Settings, updater: &Updater, cmds: &mut Vec<
             }
         },
     );
-    row(
-        ui,
-        "Accent colour",
-        "Used for buttons and selections. The first keeps the theme's own.",
-        |ui| {
-            accent_picker(ui, &mut settings.accent);
-        },
-    );
+    accent_row(ui, &mut settings.accent);
     row(
         ui,
         "Interface size",
@@ -381,8 +374,14 @@ fn toggle(ui: &mut Ui, name: &str, on: &mut bool) {
     ui.painter()
         .rect_filled(rect, CornerRadius::same(10), track);
     let x = egui::lerp(rect.left() + 10.0..=rect.right() - 10.0, t);
+    // On a pale accent (the blush, monochrome) a white knob would vanish.
+    let knob = if *on {
+        theme::on_accent()
+    } else {
+        Color32::WHITE
+    };
     ui.painter()
-        .circle_filled(pos2(x, rect.center().y), 7.0, Color32::WHITE);
+        .circle_filled(pos2(x, rect.center().y), 7.0, knob);
 }
 
 /// `− value +`. Returns -1 or 1 when a button is pressed.
@@ -425,15 +424,47 @@ fn stepper(
     step
 }
 
+/// Like [`row`], but with the swatches on their own line under the text: there
+/// are too many to fit beside it.
+fn accent_row(ui: &mut Ui, accent: &mut Accent) {
+    ui.add_space(10.0);
+    ui.label(
+        egui::RichText::new("Accent colour")
+            .font(theme::ui_font(13.0))
+            .color(theme::text()),
+    );
+    ui.add_space(2.0);
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(
+                "Used for buttons and selections. The first keeps the theme's own, which \
+                 for Feather is the golden-hour blush of its icon.",
+            )
+            .size(12.0)
+            .color(theme::text_muted()),
+        )
+        .wrap(),
+    );
+    ui.add_space(10.0);
+    ui.horizontal(|ui| accent_picker(ui, accent));
+    ui.add_space(10.0);
+    let line = ui.available_rect_before_wrap();
+    ui.painter().hline(
+        line.x_range(),
+        line.top(),
+        Stroke::new(1.0, theme::border()),
+    );
+}
+
 fn accent_picker(ui: &mut Ui, accent: &mut Accent) {
     ui.spacing_mut().item_spacing.x = 6.0;
-    // Laid out right to left, so walk the list backwards to keep its order.
-    for choice in Accent::ALL.into_iter().rev() {
+    let dark = theme::is_dark();
+    for choice in Accent::ALL {
         let (rect, response) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
         let response = response
             .on_hover_cursor(CursorIcon::PointingHand)
             .on_hover_text(choice.name());
-        match theme::accent_swatch(choice) {
+        match theme::accent_swatch(choice, dark) {
             Some(color) => {
                 ui.painter().circle_filled(rect.center(), 8.0, color);
             }
@@ -457,6 +488,12 @@ fn accent_picker(ui: &mut Ui, accent: &mut Accent) {
             *accent = choice;
         }
     }
+    ui.add_space(6.0);
+    ui.label(
+        egui::RichText::new(accent.name())
+            .size(12.0)
+            .color(theme::text_secondary()),
+    );
 }
 
 /// The themes, two to a row, each drawn in its own colors.

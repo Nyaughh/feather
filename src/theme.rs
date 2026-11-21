@@ -80,16 +80,33 @@ fn palette() -> Palette {
     CURRENT.with(Cell::get)
 }
 
-/// The color of each accent choice; `None` means "whatever the theme uses".
-pub fn accent_swatch(accent: Accent) -> Option<Color32> {
-    Some(rgb(match accent {
+/// The color of each accent choice in dark or light mode; `None` means
+/// "whatever the theme uses". Where one shade can't do both, the light-mode
+/// one is deeper so it still stands out on white (and white text on it reads).
+pub fn accent_swatch(accent: Accent, dark: bool) -> Option<Color32> {
+    let (on_dark, on_light) = match accent {
         Accent::Theme => return None,
-        Accent::Indigo => 0x5e6ad2,
-        Accent::Blue => 0x2f80ed,
-        Accent::Green => 0x2f9e6b,
-        Accent::Orange => 0xd9772b,
-        Accent::Pink => 0xd1548e,
-    }))
+        // The brand blush; on light backgrounds, the terracotta it deepens to.
+        Accent::Blush => (0xefbfa8, 0xa9563f),
+        Accent::Mono => (0xececee, 0x1b1c20),
+        Accent::Blue => (0x2f62f0, 0x2f62f0),
+        Accent::Green => (0x14a897, 0x0b7d70),
+        Accent::Violet => (0x8c79ea, 0x6f5bd6),
+        Accent::Indigo => (0x5e6ad2, 0x5e6ad2),
+        Accent::Orange => (0xd9772b, 0xc4521f),
+        Accent::Pink => (0xd1548e, 0xb83f78),
+    };
+    Some(rgb(if dark { on_dark } else { on_light }))
+}
+
+/// Ink or white, whichever reads better on `fill`.
+pub fn text_on(fill: Color32) -> Color32 {
+    const INK: Color32 = Color32::from_rgb(0x14, 0x14, 0x16);
+    if themes::contrast(INK, fill) >= themes::contrast(Color32::WHITE, fill) {
+        INK
+    } else {
+        Color32::WHITE
+    }
 }
 
 /// The palette the settings ask for, given whether the system is in dark mode.
@@ -113,7 +130,7 @@ pub fn resolve(settings: &Settings, system_dark: bool) -> Palette {
             .unwrap_or(&presets[0]);
         if dark { preset.dark } else { preset.light }
     });
-    if let Some(accent) = accent_swatch(settings.accent) {
+    if let Some(accent) = accent_swatch(settings.accent, palette.dark) {
         let pop = if palette.dark {
             Color32::WHITE
         } else {
@@ -172,11 +189,7 @@ pub fn accent_hover() -> Color32 {
 }
 /// Text and icons drawn on top of the accent color.
 pub fn on_accent() -> Color32 {
-    if themes::luminance(palette().accent) > 0.45 {
-        Color32::from_rgb(0x14, 0x14, 0x16)
-    } else {
-        Color32::WHITE
-    }
+    text_on(palette().accent)
 }
 pub fn green() -> Color32 {
     palette().green
@@ -507,5 +520,55 @@ pub fn popup_shadow() -> egui::Shadow {
         blur: 20,
         spread: 0,
         color: Color32::from_black_alpha(if is_dark() { 110 } else { 40 }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every accent, in both modes, stands out from the panels it sits on and
+    /// carries readable text, and Feather's own matches the brand preset.
+    #[test]
+    fn accents_are_legible() {
+        let feather = &themes::presets()[0];
+        for palette in [feather.dark, feather.light] {
+            let mut accents: Vec<Color32> = Accent::ALL
+                .into_iter()
+                .filter_map(|a| accent_swatch(a, palette.dark))
+                .collect();
+            accents.push(palette.accent);
+            for accent in accents {
+                assert!(
+                    themes::contrast(accent, palette.bg_panel) >= 3.0,
+                    "{accent:?} on the panel"
+                );
+                assert!(
+                    themes::contrast(text_on(accent), accent) >= 4.5,
+                    "text on {accent:?}"
+                );
+            }
+            assert_eq!(
+                Some(palette.accent),
+                accent_swatch(Accent::Blush, palette.dark)
+            );
+        }
+    }
+
+    #[test]
+    fn saved_accents_still_load() {
+        // Names saved by earlier versions, and the default when there is none.
+        for (saved, accent) in [
+            ("\"Theme\"", Accent::Theme),
+            ("\"Indigo\"", Accent::Indigo),
+            ("\"Blue\"", Accent::Blue),
+            ("\"Green\"", Accent::Green),
+            ("\"Orange\"", Accent::Orange),
+            ("\"Pink\"", Accent::Pink),
+        ] {
+            assert_eq!(serde_json::from_str::<Accent>(saved).unwrap(), accent);
+        }
+        let settings: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.accent, Accent::Theme);
     }
 }
