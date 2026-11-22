@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.3
+
+- **Updates no longer give up on slow connections**: Feather used to stop a download after two minutes, so on a slow link to GitHub an update could sit on "Downloading and checking" and then fail. Now a download that keeps moving always finishes, and the update shows how far it has got ("Downloading: 4.2 of 16.7 MB (25%)"). If nothing arrives for 30 seconds it stops and says so, with how much came through. If you are on 0.6.2 or older and the update to this version fails, download it from the website once; updates after that use the new behaviour.
+- **The worktree list works like the branch list**: it opens with a search field that matches worktree names and branches, stays a fixed height and scrolls, and Enter opens the first match.
+
 ## 0.6.2
 
 - **A new look**: Feather has a real logo now, a feather drawn by a designer, on a warm "golden-hour" tile that fades from cream to a soft rose-peach. It is the app icon on every system and is used across the website.
